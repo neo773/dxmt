@@ -85,3 +85,9 @@ private:
   if (!std::exchange(s_errorShown, true)) {                                    \
     Logger::err(str::format(__VA_ARGS__));                                     \
   }
+
+#define WARN_ONCE(...)                                                         \
+  static bool s_warnShown = false;                                             \
+  if (!std::exchange(s_warnShown, true)) {                                     \
+    Logger::warn(str::format(__VA_ARGS__));                                    \
+  }

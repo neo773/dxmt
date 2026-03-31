@@ -4,6 +4,7 @@
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_math.hpp"
+#include "wsi_platform.hpp"
 #include <mutex>
 #include <queue>
 
@@ -94,10 +95,11 @@ public:
     WMT::Reference<WMT::Buffer> buffer;
     uint64_t gpu_address;
     void *mapped_address;
+    bool owns_mapped_address = false;
 
     ~Block() {
-      if (mapped_address) {
-        free(mapped_address);
+      if (mapped_address && owns_mapped_address) {
+        wsi::aligned_free(mapped_address);
         mapped_address = nullptr;
       }
     };
@@ -109,20 +111,27 @@ public:
       buffer = std::move(move.buffer);
       gpu_address = move.gpu_address;
       mapped_address = move.mapped_address;
+      owns_mapped_address = move.owns_mapped_address;
       move.mapped_address = nullptr;
+      move.owns_mapped_address = false;
     };
   };
 
   Block
   allocate(size_t block_size) {
     Block block{};
-    block.mapped_address = placed_buffer_ ? malloc(block_size) : nullptr;
+    if (placed_buffer_) {
+      block.mapped_address = wsi::aligned_malloc(block_size, DXMT_PAGE_SIZE);
+      block.owns_mapped_address = true;
+    }
     WMTBufferInfo info;
     info.options = buffer_info_;
     info.memory.set(block.mapped_address);
     info.length = block_size;
     block.buffer = device_.newBuffer(info);
     block.gpu_address = info.gpu_address;
+    if (!placed_buffer_)
+      block.mapped_address = info.memory.get();
     return block;
   };
 
@@ -170,9 +179,11 @@ RingBumpState<Allocator, BlockSize, mutex>::allocate(
   std::lock_guard<mutex> lock(mutex_);
   while (!fifo.empty()) {
     auto &latest = fifo.back();
-    if ((align(latest.allocated_size, alignment) + size) > latest.total_size) {
+    if ((align(latest.allocated_size, alignment) + size) > latest.total_size)
       break;
-    }
+    // Don't sub-allocate into a block the GPU is still reading from a prior chunk
+    if (latest.last_used_seq_id != seq_id && latest.last_used_seq_id > coherent_id)
+      break;
     latest.last_used_seq_id = seq_id;
     return suballocate(latest, size, alignment);
   }
@@ -224,7 +235,7 @@ RingBumpState<Allocator, BlockSize, mutex>::allocate_or_reuse_block(
         fifo.pop();
         return fifo.back();
       }
-      WARN("forced to allocate new block of size ", block_size);
+      TRACE("forced to allocate new block of size ", block_size);
     }
     break;
   }

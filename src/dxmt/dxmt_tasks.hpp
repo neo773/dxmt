@@ -37,7 +37,7 @@ private:
   dxmt::mutex deps_mutex_;
   std::unordered_multimap<Task, Task> task_continuation_;
 
-  std::vector<dxmt::thread> workers_;
+  std::vector<dxmt::unnotified_thread> workers_;
 
   std::atomic_bool destroyed = false;
   std::atomic_uint64_t running = 0;
@@ -46,7 +46,9 @@ private:
 };
 
 template <typename Task> task_scheduler<Task>::task_scheduler() {
-  max_threads = dxmt::thread::hardware_concurrency() * 2;
+  SYSTEM_INFO sysinfo = {};
+  ::GetSystemInfo(&sysinfo);
+  max_threads = sysinfo.dwNumberOfProcessors * 2;
   workers_.reserve(max_threads);
   threads = 2;
 

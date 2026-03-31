@@ -425,6 +425,16 @@ public:
   };
 
   void
+  setFragmentSamplerState(obj_handle_t sampler, uint8_t index) {
+    struct wmtcmd_render_setsamplerstate cmd;
+    cmd.type = WMTRenderCommandSetFragmentSamplerState;
+    cmd.next.set(nullptr);
+    cmd.sampler_state = sampler;
+    cmd.index = index;
+    MTLRenderCommandEncoder_encodeCommands(handle, (const wmtcmd_base *)&cmd);
+  };
+
+  void
   setFragmentBytes(const void *buf, uint64_t length, uint8_t index) {
     struct wmtcmd_render_setbytes cmd;
     cmd.type = WMTRenderCommandSetFragmentBytes;
@@ -965,6 +975,22 @@ public:
   Reference<DispatchData>
   get(const K &key) {
     return Reference<DispatchData>(CacheReader_get(handle, reinterpret_cast<const void *>(&key), sizeof(key)));
+  };
+
+  uint64_t
+  preload(Device device) {
+    return CacheReader_preload(handle, device.handle);
+  };
+
+  Reference<Library>
+  getPreloaded(const void *key, uint64_t key_length) {
+    return Reference<Library>(CacheReader_getPreloaded(handle, key, key_length));
+  };
+
+  template <typename K>
+  Reference<Library>
+  getPreloaded(const K &key) {
+    return Reference<Library>(CacheReader_getPreloaded(handle, reinterpret_cast<const void *>(&key), sizeof(key)));
   };
 };
 

@@ -4,7 +4,7 @@
 
 namespace dxmt {
 
-constexpr int kDXMTShaderCacheVersion = 15;
+constexpr int kDXMTShaderCacheVersion = 16;
 
 class ShaderCache {
 public:
@@ -57,12 +57,20 @@ public:
   ShaderCache(WMTMetalVersion metal_version);
   ShaderCache(const ShaderCache &copy) = delete;
 
+  void preload(WMT::Device device);
+  WMT::Reference<WMT::Library> findPreloadedLibrary(const void *key, size_t len);
+
+  static uint64_t nowNs();
+  static void recordShader(uint64_t start_ns);
+
 private:
   WMT::Reference<WMT::CacheWriter> scache_writer_;
   dxmt::mutex scache_writer_mutex_;
 
   WMT::Reference<WMT::CacheReader> scache_reader_;
   dxmt::mutex scache_reader_mutex_;
+
+  std::atomic<bool> preload_done_{false};
 };
 
 } // namespace dxmt

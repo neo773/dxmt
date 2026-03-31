@@ -88,6 +88,7 @@ to_shader_scaler_type(microsoft::D3D10_SB_RESOURCE_RETURN_TYPE type) {
     break;
   }
   assert(0 && "invalid D3D10_SB_RESOURCE_RETURN_TYPE");
+  __builtin_unreachable();
 }
 
 uint32_t next_pow2(uint32_t x) {
@@ -384,17 +385,16 @@ void setup_metal_version(llvm::Module &module, SM50_SHADER_METAL_VERSION metal_v
   switch (metal_verison) {
   case SM50_SHADER_METAL_320: {
     airVersion->addOperand(
-        MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(7), createUnsignedInteger(0)})
+        MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(8), createUnsignedInteger(0)})
     );
     airLangVersion->addOperand(MDTuple::get(
         context, {createString("Metal"), createUnsignedInteger(3), createUnsignedInteger(2), createUnsignedInteger(0)}
     ));
-    module.setTargetTriple("air64-apple-macosx15.0.0");
     break;
   }
   default: {
     airVersion->addOperand(
-        MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(6), createUnsignedInteger(0)})
+        MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(8), createUnsignedInteger(0)})
     );
     airLangVersion->addOperand(MDTuple::get(
         context, {createString("Metal"), createUnsignedInteger(3), createUnsignedInteger(1), createUnsignedInteger(0)}

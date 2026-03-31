@@ -53,6 +53,8 @@ public:
   TextureView &operator=(TextureView &&) = delete;
   TextureView(TextureAllocation *allocation);
   TextureView(TextureAllocation *allocation, TextureViewKey key, TextureViewDescriptor descriptor);
+  TextureView(TextureAllocation *allocation, TextureViewKey key, TextureViewDescriptor descriptor,
+              WMTTextureSwizzleChannels swizzle);
 
 private:
   std::atomic<uint32_t> refcount_ = {0u};
@@ -128,6 +130,7 @@ public:
   void decRef();
 
   TextureViewKey createView(TextureViewDescriptor const &descriptor);
+  TextureViewKey createViewWithSwizzle(TextureViewDescriptor const &descriptor, WMTTextureSwizzleChannels swizzle);
 
   constexpr TextureAllocation *
   current() {
@@ -230,10 +233,11 @@ private:
   unsigned bytes_per_row_ = 0;
 
   Rc<TextureAllocation> current_;
-  uint32_t version_ = 0;
+  std::atomic<uint32_t> version_ = 0;
   std::atomic<uint32_t> refcount_ = {0u};
 
   std::vector<TextureViewDescriptor> viewDescriptors_;
+  std::vector<WMTTextureSwizzleChannels> viewSwizzles_;
   dxmt::shared_mutex mutex_;
   WMT::Device device_;
 };

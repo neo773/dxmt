@@ -15,15 +15,12 @@ CommandChunk::allocate_cpu_heap(size_t size, size_t alignment) {
 }
 
 CommandQueue::CommandQueue(WMT::Device device) :
-    encodeThread([this]() { this->EncodingThread(); }),
-    finishThread([this]() { this->WaitForFinishThread(); }),
     device(device),
     commandQueue(device.newCommandQueue(kCommandChunkCount)),
     shared_event_listener(SharedEventListener_create()),
-    event_listener_thread([this]() { SharedEventListener_start(this->shared_event_listener); }),
     staging_allocator({
         device, WMTResourceOptionCPUCacheModeWriteCombined | WMTResourceHazardTrackingModeUntracked |
-                    WMTResourceStorageModeManaged, false
+                    WMTResourceStorageModeShared
     }),
     copy_temp_allocator({device, WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModePrivate}),
     argbuf_allocator({
@@ -52,26 +49,41 @@ CommandQueue::CommandQueue(WMT::Device device) :
   }
 }
 
+void
+CommandQueue::startThreads() {
+  encodeThread = dxmt::unnotified_thread([this]() { this->EncodingThread(); });
+  finishThread = dxmt::unnotified_thread([this]() { this->WaitForFinishThread(); });
+  event_listener_thread = dxmt::unnotified_thread([this]() { SharedEventListener_start(this->shared_event_listener); });
+  threads_started_ = true;
+}
+
 CommandQueue::~CommandQueue() {
   TRACE("Destructing command queue");
-  stopped.store(true);
-  ready_for_encode++;
-  ready_for_encode.notify_one();
-  ready_for_commit++;
-  ready_for_commit.notify_one();
-  SharedEventListener_destroy(shared_event_listener);
-  encodeThread.join();
-  finishThread.join();
+  if (threads_started_) {
+    stopped.store(true);
+    ready_for_encode++;
+    ready_for_encode.notify_one();
+    ready_for_commit++;
+    ready_for_commit.notify_one();
+    encodeThread.join();
+    finishThread.join();
+    SharedEventListener_destroy(shared_event_listener);
+    shared_event_listener = 0;
+    event_listener_thread.join();
+  }
+  if (shared_event_listener)
+    SharedEventListener_destroy(shared_event_listener);
   for (unsigned i = 0; i < kCommandChunkCount; i++) {
     auto &chunk = chunks[i];
     chunk.reset();
   };
-  event_listener_thread.join();
   TRACE("Destructed command queue");
 }
 
 void
 CommandQueue::CommitCurrentChunk() {
+  if (unlikely(!threads_started_))
+    startThreads();
   auto chunk_id = ready_for_encode.load(std::memory_order_relaxed);
   auto &chunk = chunks[chunk_id % kCommandChunkCount];
   chunk.chunk_id = chunk_id;

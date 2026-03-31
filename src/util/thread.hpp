@@ -20,10 +20,6 @@
 
 #include "util_error.hpp"
 
-
-#include "./rc/util_rc.hpp"
-#include "./rc/util_rc_ptr.hpp"
-
 namespace dxmt {
 
 /**
@@ -36,112 +32,79 @@ enum class ThreadPriority : int32_t {
 
 #ifdef _WIN32
 /**
- * \brief Thread helper class
+ * \brief Thread that skips DLL_THREAD_ATTACH processing
  *
- * This is needed mostly  for winelib builds. Wine needs to setup each thread
- * that calls Windows APIs. It means that in winelib builds, we can't let
- * standard C++ library create threads and need to use Wine for that instead. We
- * use a thin wrapper around Windows thread functions so that the rest of code
- * just has to use dxmt::thread class instead of std::thread.
+ * Uses NtCreateThreadEx with THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH
+ * to create threads that bypass Wine's loader_section acquisition for
+ * DLL notifications. This prevents deadlocks when Metal framework
+ * threads contend with Wine's loader lock during DLL initialization.
  */
-class ThreadFn : public RcObject {
-  using Proc = std::function<void()>;
-
+class unnotified_thread {
 public:
-  ThreadFn(Proc &&proc) : m_proc(std::move(proc)) {
-    // Reference for the thread function
-    this->incRef();
+  unnotified_thread() {}
 
-    m_handle = ::CreateThread(nullptr, 0x100000, ThreadFn::threadProc, this,
-                              STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
-
-    if (m_handle == nullptr)
-      throw MTLD3DError("Failed to create thread");
+  explicit unnotified_thread(std::function<void()> &&func)
+      : m_proc(new std::function<void()>(std::move(func))) {
+    // NtCreateThreadEx with THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH (0x2)
+    // Declare locally to avoid winternl.h conflicts
+    using NtCreateThreadEx_t = LONG(WINAPI *)(
+        HANDLE *, ACCESS_MASK, void *, HANDLE,
+        DWORD(WINAPI *)(void *), void *,
+        ULONG, ULONG_PTR, SIZE_T, SIZE_T, void *);
+    static auto pNtCreateThreadEx = (NtCreateThreadEx_t)
+        ::GetProcAddress(::GetModuleHandleA("ntdll.dll"), "NtCreateThreadEx");
+    LONG status = pNtCreateThreadEx(
+        &m_handle, THREAD_ALL_ACCESS, nullptr, GetCurrentProcess(),
+        threadProc, m_proc,
+        0x2 /* SKIP_THREAD_ATTACH */, 0, 0x100000, 0x100000, nullptr);
+    if (status != 0) {
+      delete m_proc;
+      m_proc = nullptr;
+      throw MTLD3DError("Failed to create native thread");
+    }
   }
 
-  ~ThreadFn() {
-    if (this->joinable())
+  ~unnotified_thread() {
+    if (m_handle)
       std::terminate();
   }
 
-  void detach() {
+  unnotified_thread(unnotified_thread &&other)
+      : m_handle(other.m_handle), m_proc(other.m_proc) {
+    other.m_handle = nullptr;
+    other.m_proc = nullptr;
+  }
+
+  unnotified_thread &operator=(unnotified_thread &&other) {
+    if (m_handle)
+      std::terminate();
+    m_handle = other.m_handle;
+    m_proc = other.m_proc;
+    other.m_handle = nullptr;
+    other.m_proc = nullptr;
+    return *this;
+  }
+
+  void join() {
+    if (!m_handle)
+      throw MTLD3DError("Thread not joinable");
+    ::WaitForSingleObjectEx(m_handle, INFINITE, FALSE);
     ::CloseHandle(m_handle);
     m_handle = nullptr;
   }
 
-  void join() {
-    if (::WaitForSingleObjectEx(m_handle, INFINITE, FALSE) == WAIT_FAILED)
-      throw MTLD3DError("Failed to join thread");
-    this->detach();
-  }
-
   bool joinable() const { return m_handle != nullptr; }
 
-  void set_priority(ThreadPriority priority) {
-    int32_t value;
-    switch (priority) {
-    default:
-    case ThreadPriority::Normal:
-      value = THREAD_PRIORITY_NORMAL;
-      break;
-    case ThreadPriority::Lowest:
-      value = THREAD_PRIORITY_LOWEST;
-      break;
-    }
-    ::SetThreadPriority(m_handle, int32_t(value));
-  }
-
 private:
-  Proc m_proc;
-  HANDLE m_handle;
+  HANDLE m_handle = nullptr;
+  std::function<void()> *m_proc = nullptr;
 
   static DWORD WINAPI threadProc(void *arg) {
-    auto thread = reinterpret_cast<ThreadFn *>(arg);
-    thread->m_proc();
-    thread->decRef();
+    auto *func = static_cast<std::function<void()> *>(arg);
+    (*func)();
+    delete func;
     return 0;
   }
-};
-
-/**
- * \brief RAII thread wrapper
- *
- * Wrapper for \c ThreadFn that can be used
- * as a drop-in replacement for \c std::thread.
- */
-class thread {
-
-public:
-  thread() {}
-
-  explicit thread(std::function<void()> &&func)
-      : m_thread(new ThreadFn(std::move(func))) {}
-
-  thread(thread &&other) : m_thread(std::move(other.m_thread)) {}
-
-  thread &operator=(thread &&other) {
-    m_thread = std::move(other.m_thread);
-    return *this;
-  }
-
-  void detach() { m_thread->detach(); }
-
-  void join() { m_thread->join(); }
-
-  bool joinable() const { return m_thread != nullptr && m_thread->joinable(); }
-
-  void set_priority(ThreadPriority priority) {
-    m_thread->set_priority(priority);
-  }
-
-  static uint32_t hardware_concurrency() {
-    SYSTEM_INFO info = {};
-    ::GetSystemInfo(&info);
-    return info.dwNumberOfProcessors;
-  }
-
-private:
-  Rc<ThreadFn> m_thread;
 };
 
 namespace this_thread {

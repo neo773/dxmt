@@ -11,13 +11,14 @@ endif
 
 llvm_ld_flags_darwin = [
   '-L'+join_paths(native_llvm_path, 'lib'),
-  '-lm', '-lz', '-lcurses', '-lxml2'
+  '-lm', '-lz', '-lcurses', '-lxml2',
+  '-Wl,-w'
 ]
 
 if native_llvm_path.startswith('/usr/local/opt')
   llvm_ld_flags_darwin = [
     llvm_ld_flags_darwin,
-    '/usr/local/opt/zstd/lib/libzstd.a', '/usr/local/opt/llvm@15/lib/libunwind.a'
+    '/usr/local/opt/zstd/lib/libzstd.a'
   ]
 endif
 

@@ -36,6 +36,8 @@ llvm_deps = [
 
 airconv_args = [
   '-Wno-extern-c-compat',
+  '-Wno-unnecessary-virtual-specifier', # LLVM 15 headers
+  '-Wno-nontrivial-memcall',            # DXBCParser third-party lib
   # LLVM
   '-fno-exceptions',
   '-funwind-tables',
@@ -98,6 +100,4 @@ executable('airconv', airconv_src + airconv_cli_src,
 
 endif
 
-if cpu_family == 'x86_64' or cpu_family == 'aarch64' or not dxmt_crossbuild
-  subdir('darwin')
-endif
+subdir('darwin')

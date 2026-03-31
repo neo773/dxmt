@@ -1020,6 +1020,25 @@ CacheReader_get(obj_handle_t reader, const void *key, uint64_t length) {
   return params.ret_data;
 }
 
+WINEMETAL_API uint64_t
+CacheReader_preload(obj_handle_t reader, obj_handle_t device) {
+  struct unixcall_cache_preload params = {};
+  params.cache = reader;
+  params.device = device;
+  UNIX_CALL(131, &params);
+  return params.ret_count;
+}
+
+WINEMETAL_API obj_handle_t
+CacheReader_getPreloaded(obj_handle_t reader, const void *key, uint64_t key_length) {
+  struct unixcall_cache_get_preloaded params = {};
+  params.cache = reader;
+  WMT_MEMPTR_SET(params.key, key);
+  params.key_length = key_length;
+  UNIX_CALL(132, &params);
+  return params.ret_library;
+}
+
 WINEMETAL_API obj_handle_t
 CacheWriter_alloc_init(const char *path, uint64_t version) {
   struct unixcall_cache_alloc_init params;

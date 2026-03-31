@@ -418,6 +418,26 @@ ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, unsigned viewId, unsi
 }
 
 void
+ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, TextureAllocation *allocation, unsigned viewId, unsigned arrayLength, WMTClearColor color) {
+  assert(!encoder_current);
+  auto encoder_info = allocate<ClearEncoderData>();
+  encoder_info->type = EncoderType::Clear;
+  encoder_info->id = nextEncoderId();
+  encoder_info->clear_dsv = 0;
+  encoder_info->color = color;
+  encoder_info->array_length = arrayLength;
+  encoder_info->width = texture->width();
+  encoder_info->height = texture->height();
+  encoder_current = encoder_info;
+
+  encoder_info->attachment = access(texture, allocation, viewId, DXMT_ENCODER_RESOURCE_ACESS_WRITE);
+
+  currentFrameStatistics().clear_pass_count++;
+
+  endPass();
+}
+
+void
 ArgumentEncodingContext::clearDepthStencil(
     Rc<Texture> &&texture, unsigned viewId, unsigned arrayLength, unsigned flag, float depth, uint8_t stencil
 ) {
@@ -435,7 +455,29 @@ ArgumentEncodingContext::clearDepthStencil(
   encoder_info->attachment = access(texture, viewId, DXMT_ENCODER_RESOURCE_ACESS_WRITE);
 
   currentFrameStatistics().clear_pass_count++;
-  
+
+  endPass();
+}
+
+void
+ArgumentEncodingContext::clearDepthStencil(
+    Rc<Texture> &&texture, TextureAllocation *allocation, unsigned viewId, unsigned arrayLength, unsigned flag, float depth, uint8_t stencil
+) {
+  assert(!encoder_current);
+  auto encoder_info = allocate<ClearEncoderData>();
+  encoder_info->type = EncoderType::Clear;
+  encoder_info->id = nextEncoderId();
+  encoder_info->clear_dsv = flag & DepthStencilPlanarFlags(texture->pixelFormat());
+  encoder_info->depth_stencil = {depth, stencil};
+  encoder_info->array_length = arrayLength;
+  encoder_info->width = texture->width();
+  encoder_info->height = texture->height();
+  encoder_current = encoder_info;
+
+  encoder_info->attachment = access(texture, allocation, viewId, DXMT_ENCODER_RESOURCE_ACESS_WRITE);
+
+  currentFrameStatistics().clear_pass_count++;
+
   endPass();
 }
 
@@ -466,6 +508,23 @@ ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter,
   encoder_info->metadata = metadata;
 
   encoder_info->tex_read.add(texture->current()->depkey);
+
+  encoder_current = encoder_info;
+  endPass();
+}
+
+void
+ArgumentEncodingContext::present(Rc<Texture> &texture, TextureAllocation *allocation, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata) {
+  assert(!encoder_current);
+  auto encoder_info = allocate<PresentData>();
+  encoder_info->type = EncoderType::Present;
+  encoder_info->id = nextEncoderId();
+  encoder_info->backbuffer = allocation->texture();
+  encoder_info->presenter = presenter;
+  encoder_info->after = after;
+  encoder_info->metadata = metadata;
+
+  encoder_info->tex_read.add(allocation->depkey);
 
   encoder_current = encoder_info;
   endPass();
@@ -572,9 +631,10 @@ ArgumentEncodingContext::startRenderPass(
   encoder_info->dsv_planar_flags = dsv_planar_flags;
   encoder_info->dsv_readonly_flags = dsv_readonly_flags;
   encoder_info->render_target_count = render_target_count;
-  auto [gpu_buffer_contents, gpu_buffer_, offset] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
+  auto [gpu_buffer_contents, gpu_buffer_, offset, gpu_address] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
   encoder_info->allocated_argbuf = gpu_buffer_;
   encoder_info->allocated_argbuf_offset = offset;
+  encoder_info->allocated_argbuf_gpu_base = gpu_address;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
   encoder_current = encoder_info;
 
@@ -594,7 +654,7 @@ ArgumentEncodingContext::startComputePass(uint64_t encoder_argbuf_size) {
   encoder_info->cmd_head.type = WMTComputeCommandNop;
   encoder_info->cmd_head.next.set(0);
   encoder_info->cmd_tail = (wmtcmd_base *)&encoder_info->cmd_head;
-  auto [gpu_buffer_contents, gpu_buffer_, offset] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
+  auto [gpu_buffer_contents, gpu_buffer_, offset, gpu_address] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
   encoder_info->allocated_argbuf = gpu_buffer_;
   encoder_info->allocated_argbuf_offset = offset;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
@@ -624,14 +684,13 @@ ArgumentEncodingContext::startBlitPass() {
 void
 ArgumentEncodingContext::endPass() {
   assert(encoder_current);
-  encoder_last->next = encoder_current;
-  encoder_last = encoder_current;
+
+  encoder_list_.push_back(encoder_current);
 
   if (encoder_current->type == EncoderType::Render)
     vro_state_.endEncoder();
 
   encoder_current = nullptr;
-  encoder_count_++;
 }
 
 std::pair<WMT::Buffer, size_t>
@@ -683,9 +742,9 @@ ArgumentEncodingContext::currentFrameStatistics() {
 void
 ArgumentEncodingContext::sampleTimestamp(Rc<TimestampQuery> &&query) {
   assert(!encoder_current);
-  if (encoder_last && encoder_last->type == EncoderType::SampleTimestamp) {
+  if (!encoder_list_.empty() && encoder_list_.back()->type == EncoderType::SampleTimestamp) {
     timestamp_state_.coalaseQuery(query.ptr());
-    static_cast<SampleTimestampData *>(encoder_last)->queries.push_back(std::move(query));
+    static_cast<SampleTimestampData *>(encoder_list_.back())->queries.push_back(std::move(query));
     return;
   }
   auto encoder_info = allocate<SampleTimestampData>();
@@ -714,20 +773,8 @@ QueryReadbacks
 ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
   assert(!encoder_current);
 
-  unsigned encoder_count = encoder_count_;
-  unsigned encoder_index = 0;
-  EncoderData **encoders =
-      reinterpret_cast<EncoderData **>(allocate_cpu_heap(sizeof(EncoderData *) * encoder_count, alignof(EncoderData *))
-      );
-
-  {
-    EncoderData *current = encoder_head.next;
-    while (current) {
-      encoders[encoder_index++] = current;
-      current = current->next;
-    }
-    assert(encoder_index == encoder_count);
-  }
+  unsigned encoder_count = (unsigned)encoder_list_.size();
+  EncoderData **encoders = encoder_list_.data();
 
   if (encoder_count > 1) {
     unsigned j, i;
@@ -754,8 +801,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
 
   readbacks.timestamp = timestamp_state_.flush(cmdbuf);
 
-  while (encoder_index) {
-    auto current = encoders[encoder_count - encoder_index];
+  for (unsigned encoder_idx = 0; encoder_idx < encoder_count; encoder_idx++) {
+    auto current = encoders[encoder_idx];
     switch (current->type) {
     case EncoderType::Render: {
       auto data = static_cast<RenderEncoderData *>(current);
@@ -813,8 +860,10 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
       auto gpu_buffer_ = data->allocated_argbuf;
       auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
       encoder.setVertexBuffer(gpu_buffer_, 0, 16);
+      encoder.setVertexBuffer(gpu_buffer_, 0, 17);
       encoder.setVertexBuffer(gpu_buffer_, 0, 29);
       encoder.setVertexBuffer(gpu_buffer_, 0, 30);
+      encoder.setFragmentBuffer(gpu_buffer_, 0, 18);
       encoder.setFragmentBuffer(gpu_buffer_, 0, 29);
       encoder.setFragmentBuffer(gpu_buffer_, 0, 30);
       if (data->use_geometry || data->use_tessellation) {
@@ -838,7 +887,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
           uint32_t vertex_count_per_warp;
           uint32_t end_of_command;
         };
-        auto [mapped_task_data, task_data_buffer, task_data_buffer_offset] =
+        auto [mapped_task_data, task_data_buffer, task_data_buffer_offset, task_data_gpu_addr] =
             queue_.AllocateArgumentBuffer(seq_id_, sizeof(GS_MARSHAL_TASK) * task_count);
         auto tasks_data = (GS_MARSHAL_TASK *)mapped_task_data;
         for (unsigned i = 0; i<task_count; i++) {
@@ -864,7 +913,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
           uint16_t patch_per_group;
           uint32_t end_of_command;
         };
-        auto [mapped_task_data, task_data_buffer, task_data_buffer_offset] =
+        auto [mapped_task_data, task_data_buffer, task_data_buffer_offset, task_data_gpu_addr] =
             queue_.AllocateArgumentBuffer(seq_id_, sizeof(TS_MARSHAL_TASK) * task_count);
         auto tasks_data = (TS_MARSHAL_TASK *)mapped_task_data;
         for (unsigned i = 0; i<task_count; i++) {
@@ -1046,11 +1095,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
     default:
       break;
     }
-    encoder_index--;
   }
-  encoder_head.next = nullptr;
-  encoder_last = &encoder_head;
-  encoder_count_ = 0;
+  encoder_list_.clear();
 
   cmdbuf.encodeSignalEvent(queue_.event, event_seq_id);
 

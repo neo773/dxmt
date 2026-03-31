@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #include "sqlite3.h"
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
@@ -6,6 +7,8 @@
 @interface CacheReader : NSObject
 - (instancetype)initWithPath:(NSString *)path version:(uint64_t)version;
 - (dispatch_data_t)get:(NSData *)key;
+- (uint64_t)preloadAll:(id<MTLDevice>)device;
+- (id<MTLLibrary>)getPreloaded:(NSData *)key;
 @end
 
 @interface CacheWriter : NSObject
@@ -16,6 +19,8 @@
 @interface CacheReader () {
   sqlite3 *_db;
   sqlite3_stmt *_stmt;
+  sqlite3_stmt *_enumStmt;
+  NSMutableDictionary *_preloaded; // key(NSData) -> MTLLibrary
 }
 @end
 
@@ -62,6 +67,12 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
       sqlite3_close(_db);
       return nil;
     }
+
+    NSString *sqlEnum = [NSString stringWithFormat:@"SELECT key, value FROM %@;", tableName];
+    if (sqlite3_prepare_v2(_db, sqlEnum.UTF8String, -1, &_enumStmt, NULL) != SQLITE_OK) {
+      NSLog(@"[CacheReader] Failed to prepare enum: %s", sqlite3_errmsg(_db));
+      _enumStmt = NULL;
+    }
   }
   return self;
 }
@@ -81,9 +92,43 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
   return result;
 }
 
+- (uint64_t)preloadAll:(id<MTLDevice>)device {
+  if (!_enumStmt) return 0;
+  sqlite3_reset(_enumStmt);
+  _preloaded = [[NSMutableDictionary alloc] init];
+  uint64_t count = 0;
+  while (sqlite3_step(_enumStmt) == SQLITE_ROW) {
+    const void *keyBytes = sqlite3_column_blob(_enumStmt, 0);
+    int keyLen = sqlite3_column_bytes(_enumStmt, 0);
+    const void *valBytes = sqlite3_column_blob(_enumStmt, 1);
+    int valLen = sqlite3_column_bytes(_enumStmt, 1);
+
+    NSData *keyData = [[NSData alloc] initWithBytes:keyBytes length:keyLen];
+    dispatch_data_t bitcode = dispatch_data_create(valBytes, valLen, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    NSError *err = nil;
+    id<MTLLibrary> library = [device newLibraryWithData:bitcode error:&err];
+    dispatch_release(bitcode);
+    if (library) {
+      _preloaded[keyData] = library;
+      count++;
+    }
+    [keyData release];
+  }
+  sqlite3_reset(_enumStmt);
+  return count;
+}
+
+- (id<MTLLibrary>)getPreloaded:(NSData *)key {
+  if (!_preloaded) return nil;
+  return [_preloaded[key] retain];
+}
+
 - (void)dealloc {
   if (_stmt)
     sqlite3_finalize(_stmt);
+  if (_enumStmt)
+    sqlite3_finalize(_enumStmt);
+  [_preloaded release];
   if (_db)
     sqlite3_close(_db);
   [super dealloc];
@@ -197,6 +242,25 @@ _CacheReader_get(void *obj) {
       [[NSData alloc] initWithBytesNoCopy:(void *)params->key.ptr length:params->key_length freeWhenDone:false];
   CacheReader *reader = (CacheReader *)params->cache;
   params->ret_data = (obj_handle_t)[reader get:key];
+  [key release];
+  return 0;
+}
+
+int
+_CacheReader_preload(void *obj) {
+  struct unixcall_cache_preload *params = obj;
+  CacheReader *reader = (CacheReader *)params->cache;
+  id<MTLDevice> device = (id<MTLDevice>)(void *)params->device;
+  params->ret_count = [reader preloadAll:device];
+  return 0;
+}
+
+int
+_CacheReader_getPreloaded(void *obj) {
+  struct unixcall_cache_get_preloaded *params = obj;
+  CacheReader *reader = (CacheReader *)params->cache;
+  NSData *key = [[NSData alloc] initWithBytesNoCopy:(void *)params->key.ptr length:params->key_length freeWhenDone:false];
+  params->ret_library = (obj_handle_t)[reader getPreloaded:key];
   [key release];
   return 0;
 }

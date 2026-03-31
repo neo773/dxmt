@@ -112,7 +112,7 @@ public:
 private:
   CommandQueue *queue;
   WMT::Reference<WMT::CommandBuffer> attached_cmdbuf;
-  
+
   CommandList<ArgumentEncodingContext> list_enc;
   AllocationRefTracking ref_tracker;
 
@@ -151,14 +151,21 @@ private:
   uint64_t encoder_seq = 1;
   uint64_t frame_count = 0;
   uint32_t max_latency_ = 3;
+#ifdef DXMT_PERF
+  clock::time_point last_log_time_{clock::now()};
+  double tsc_per_ms_ = calibrate_tsc_to_ms();
+#endif
 
-  dxmt::thread encodeThread;
-  dxmt::thread finishThread;
+  dxmt::unnotified_thread encodeThread;
+  dxmt::unnotified_thread finishThread;
   WMT::Device device;
   WMT::Reference<WMT::CommandQueue> commandQueue;
 
   obj_handle_t shared_event_listener;
-  dxmt::thread event_listener_thread;
+  dxmt::unnotified_thread event_listener_thread;
+  bool threads_started_ = false;
+
+  void startThreads();
 
   friend class CommandChunk;
   uint64_t
@@ -237,11 +244,64 @@ public:
   }
 
   void
+  WaitForIdle() {
+    auto seq = ready_for_encode.load(std::memory_order_relaxed) - 1;
+    if (seq > 0)
+      cpu_coherent.wait(seq);
+  }
+
+  void
   PresentBoundary() {
     statistics.compute(frame_count);
+
+#ifdef DXMT_PERF
+    {
+      auto now = clock::now();
+      if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log_time_).count() >= 5) {
+        last_log_time_ = now;
+        auto &avg = statistics.average();
+        auto ms = [](clock::duration d) -> double { return d.count() / 1000000.0; };
+        char buf[512];
+        // Encoder thread timings
+        double enc_total = ms(avg.encode_prepare_interval) + ms(avg.encode_flush_interval);
+        snprintf(buf, sizeof(buf),
+            "perf [encoder]: %.1fms (prepare=%.1f flush=%.1f commit=%.1f) | cmdbuf=%u render=%u(%umerged) clear=%u(%umerged)",
+            enc_total,
+            ms(avg.encode_prepare_interval),
+            ms(avg.encode_flush_interval),
+            ms(avg.commit_interval),
+            avg.command_buffer_count,
+            avg.render_pass_count, avg.render_pass_optimized,
+            avg.clear_pass_count, avg.clear_pass_optimized);
+        Logger::info(buf);
+        if (avg.d3d9_draw_count > 0) {
+          // Capture time sampled every 32nd draw — scale up
+          constexpr double S = 32.0;
+          auto tms = [this](uint64_t ticks) -> double { return (double)ticks / tsc_per_ms_; };
+          double frame = tms(avg.d3d9_frame_ticks);
+          double capture = tms(avg.d3d9_capture_ticks) * S;
+          double lock = tms(avg.d3d9_lock_ticks);
+          double frame_other = frame - capture - lock;
+          double d3d9_pct = frame > 0 ? (capture + lock) / frame * 100.0 : 0;
+          snprintf(buf, sizeof(buf),
+              "perf [api]:     frame=%.1fms (%.0f%% d3d9) | draws=%u(+%uUP) states=%u pso_miss=%u latency=%.1fms",
+              frame, d3d9_pct,
+              avg.d3d9_draw_count, avg.d3d9_draw_up_count,
+              avg.d3d9_state_change_count, avg.d3d9_pso_miss_count,
+              ms(avg.present_lantency_interval));
+          Logger::info(buf);
+          snprintf(buf, sizeof(buf),
+              "perf [api]:     capture=%.1fms lock=%.1fms other=%.1fms",
+              capture, lock, frame_other);
+          Logger::info(buf);
+        }
+      }
+    }
+#endif
+
     frame_count++;
     statistics.at(frame_count).reset();
-    // After present N-th frame (N starts from 1), wait for (N - max_latency)-th frame to finish rendering 
+    // After present N-th frame (N starts from 1), wait for (N - max_latency)-th frame to finish rendering
     if (likely(frame_count > max_latency_)) {
       auto t0 = clock::now();
       frame_latency_fence_.wait(frame_count - max_latency_);
@@ -260,10 +320,28 @@ public:
     cpu_coherent.wait(seq);
   };
 
+  struct TransientAllocation {
+    void *cpu_ptr;
+    WMT::Buffer buffer;
+    uint64_t offset;
+    uint64_t gpu_address;
+  };
+
   std::tuple<WMT::Buffer, uint64_t>
   AllocateStagingBuffer(size_t size, size_t alignment) {
     auto [block, offset] = staging_allocator.allocate(ready_for_encode, cpu_coherent.signaledValue(), size, alignment);
     return {block.buffer, offset};
+  }
+
+  TransientAllocation
+  AllocateTransientBuffer(size_t size, size_t alignment) {
+    auto [block, offset] = staging_allocator.allocate(ready_for_encode, cpu_coherent.signaledValue(), size, alignment);
+    return {
+      static_cast<char*>(block.mapped_address) + offset,
+      block.buffer,
+      offset,
+      block.gpu_address + offset
+    };
   }
 
   std::pair<WMT::Buffer, uint64_t>
@@ -278,10 +356,10 @@ public:
     return {block.buffer, offset, block.gpu_address};
   }
 
-  std::tuple<void *, WMT::Buffer, uint64_t>
+  std::tuple<void *, WMT::Buffer, uint64_t, uint64_t>
   AllocateArgumentBuffer(uint64_t seq, size_t size) {
     auto [block, offset] = argbuf_allocator.allocate(seq, cpu_coherent.signaledValue(), size, 64);
-    return {ptr_add(block.mapped_address, offset), block.buffer, offset};
+    return {ptr_add(block.mapped_address, offset), block.buffer, offset, block.gpu_address + offset};
   }
 
   void *

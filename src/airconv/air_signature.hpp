@@ -663,9 +663,9 @@ inline TextureKind to_air_resource_type(
     return use_depth ? TextureKind::depth_cube_array
                      : TextureKind::texture_cube_array;
   default:
-    break;
+    assert(0 && "unreachable");
+    __builtin_unreachable();
   };
-  assert(0 && "unreachable");
 };
 
 inline MSLScalerType
@@ -679,8 +679,9 @@ to_air_scaler_type(dxmt::shader::common::ScalerDataType type) {
     return msl_int;
   case shader::common::ScalerDataType::Double:
     assert(0 && "");
-    break;
+    __builtin_unreachable();
   }
+  __builtin_unreachable();
 }
 
 } // namespace dxmt::air

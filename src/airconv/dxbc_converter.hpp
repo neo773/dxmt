@@ -301,7 +301,7 @@ constexpr air::MSLScalerOrVectorType to_msl_type(RegisterComponentType type) {
   switch (type) {
   case RegisterComponentType::Unknown: {
     assert(0 && "unknown component type");
-    break;
+    __builtin_unreachable();
   }
   case RegisterComponentType::Uint:
     return air::msl_uint4;
@@ -309,8 +309,8 @@ constexpr air::MSLScalerOrVectorType to_msl_type(RegisterComponentType type) {
     return air::msl_int4;
   case RegisterComponentType::Float:
     return air::msl_float4;
-    break;
   }
+  __builtin_unreachable();
 }
 
 struct ScalarInfo {

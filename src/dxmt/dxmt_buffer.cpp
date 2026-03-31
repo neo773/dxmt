@@ -56,7 +56,7 @@ Buffer::view_(BufferViewKey key) {
 
 BufferView const &
 Buffer::view_(BufferViewKey key, BufferAllocation *allocation) {
-  if (unlikely(allocation->version_ != version_)) {
+  if (unlikely(allocation->version_ != version_.load(std::memory_order_acquire))) {
     prepareAllocationViews(allocation);
   }
   return *allocation->cached_view_[key];
@@ -69,7 +69,7 @@ Buffer::residency(BufferViewKey key) {
 
 DXMT_RESOURCE_RESIDENCY_STATE &
 Buffer::residency(BufferViewKey key, BufferAllocation *allocation) {
-  if (unlikely(allocation->version_ != version_)) {
+  if (unlikely(allocation->version_ != version_.load(std::memory_order_acquire))) {
     prepareAllocationViews(allocation);
   }
   return allocation->cached_view_[key]->residency;
@@ -78,7 +78,8 @@ Buffer::residency(BufferViewKey key, BufferAllocation *allocation) {
 void
 Buffer::prepareAllocationViews(BufferAllocation *allocation) {
   std::unique_lock<dxmt::mutex> lock(mutex_);
-  for (unsigned version = allocation->version_; version < version_; version++) {
+  auto current_version = version_.load(std::memory_order_relaxed);
+  for (unsigned version = allocation->version_; version < current_version; version++) {
     auto format = viewDescriptors_[version].format;
     auto texel_size = MTLGetTexelSize(format);
     assert(texel_size);
@@ -111,20 +112,21 @@ Buffer::prepareAllocationViews(BufferAllocation *allocation) {
         std::move(view), info.gpu_resource_id, allocation->suballocation_size_ / texel_size
     ));
   }
-  allocation->version_ = version_;
+  allocation->version_ = current_version;
 };
 
 BufferViewKey
 Buffer::createView(BufferViewDescriptor const &descriptor) {
   std::unique_lock<dxmt::mutex> lock(mutex_);
   unsigned i = 0;
-  for (; i < version_; i++) {
+  auto ver = version_.load(std::memory_order_relaxed);
+  for (; i < ver; i++) {
     if (viewDescriptors_[i].format == descriptor.format) {
       return i;
     }
   }
   viewDescriptors_.push_back(descriptor);
-  version_ = version_ + 1;
+  version_.store(ver + 1, std::memory_order_release);
   return i;
 }
 

@@ -912,6 +912,11 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
       [encoder setFragmentTexture:(id<MTLTexture>)body->texture atIndex:body->index];
       break;
     }
+    case WMTRenderCommandSetFragmentSamplerState: {
+      struct wmtcmd_render_setsamplerstate *body = (struct wmtcmd_render_setsamplerstate *)next;
+      [encoder setFragmentSamplerState:(id<MTLSamplerState>)body->sampler_state atIndex:body->index];
+      break;
+    }
     case WMTRenderCommandSetRasterizerState: {
       struct wmtcmd_render_setrasterizerstate *body = (struct wmtcmd_render_setrasterizerstate *)next;
       [encoder setTriangleFillMode:(MTLTriangleFillMode)body->fill_mode];
@@ -2756,6 +2761,8 @@ _MTLCommandBuffer_property(void *obj) {
 
 NTSTATUS _CacheReader_alloc_init(void *obj);
 NTSTATUS _CacheReader_get(void *obj);
+NTSTATUS _CacheReader_preload(void *obj);
+NTSTATUS _CacheReader_getPreloaded(void *obj);
 NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
@@ -2892,6 +2899,8 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLCounterSampleBuffer_resolveCounterRange,
     &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
     &_MTLCommandBuffer_property,
+    &_CacheReader_preload,
+    &_CacheReader_getPreloaded,
 };
 
 #ifndef DXMT_NATIVE
@@ -3027,5 +3036,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLCounterSampleBuffer_resolveCounterRange,
     &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
     &_MTLCommandBuffer_property,
+    &_CacheReader_preload,
+    &_CacheReader_getPreloaded,
 };
 #endif

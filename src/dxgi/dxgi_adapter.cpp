@@ -218,6 +218,7 @@ public:
   RegisterHardwareContentProtectionTeardownStatusEvent(HANDLE event,
                                                        DWORD *cookie) override {
     assert(0 && "TODO");
+    return E_NOTIMPL;
   }
 
   void STDMETHODCALLTYPE
@@ -261,6 +262,7 @@ public:
   HRESULT STDMETHODCALLTYPE RegisterVideoMemoryBudgetChangeNotificationEvent(
       HANDLE event, DWORD *cookie) override {
     assert(0 && "TODO");
+    return E_NOTIMPL;
   }
 
   void STDMETHODCALLTYPE

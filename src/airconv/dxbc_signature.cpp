@@ -27,6 +27,7 @@ to_air_interpolation(microsoft::D3D10_SB_INTERPOLATION_MODE mode) {
     return air::Interpolation::center_no_perspective;
   default:
     assert(0 && "Unexpected D3D10_SB_INTERPOLATION_MODE");
+    __builtin_unreachable();
   }
 }
 
@@ -314,7 +315,7 @@ void handle_signature_ps(
     auto siv = Inst.m_InputPSDeclSIV.Name;
     auto interpolation =
       to_air_interpolation(Inst.m_InputPSDeclSIV.InterpolationMode);
-    uint32_t assigned_index;
+    uint32_t assigned_index = 0;
     switch (siv) {
     case D3D10_SB_NAME_POSITION:
       // assert(
@@ -360,9 +361,9 @@ void handle_signature_ps(
     unsigned reg = Inst.m_Operands[0].m_Index[0].m_RegIndex;
     auto mask = Inst.m_Operands[0].m_WriteMask >> 4;
     auto siv = Inst.m_InputPSDeclSIV.Name;
-    auto interpolation =
+    [[maybe_unused]] auto interpolation =
       to_air_interpolation(Inst.m_InputPSDeclSGV.InterpolationMode);
-    uint32_t assigned_index;
+    uint32_t assigned_index = 0;
     switch (siv) {
     case microsoft::D3D10_SB_NAME_IS_FRONT_FACE:
       assert(interpolation == Interpolation::flat);

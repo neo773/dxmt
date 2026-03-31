@@ -80,6 +80,7 @@ auto extend_to_vec4(pvalue value) {
       if (vecTy->getNumElements() == 1)
         return ctx.builder.CreateShuffleVector(value, {0, 0, 0, 0});
       assert(0 && "?");
+      __builtin_unreachable();
     } else {
       return ctx.builder.CreateVectorSplat(4, value);
     }
@@ -125,6 +126,7 @@ auto to_desired_type_from_int_vec4(pvalue vec4, llvm::Type *desired, uint32_t ma
             ctx.builder.CreateBitCast(vec4, ctx.types._float4), (uint64_t)__builtin_ctz(mask)
           );
         assert(0 && "unhandled vec4");
+        __builtin_unreachable();
       };
     return convert(vec4, desired);
   });

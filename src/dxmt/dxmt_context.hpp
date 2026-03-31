@@ -168,6 +168,7 @@ struct RenderEncoderData : EncoderData {
   wmtcmd_base *cmd_tail;
   WMT::Buffer allocated_argbuf;
   uint64_t allocated_argbuf_offset;
+  uint64_t allocated_argbuf_gpu_base; // GPU address of the argbuf region
   void *allocated_argbuf_mapping;
   uint8_t dsv_planar_flags;
   uint8_t dsv_readonly_flags;
@@ -354,9 +355,23 @@ public:
   }
 
   template<bool PreRasterStage = false>
+  WMT::Texture
+  access(TextureAllocation *allocation, DXMT_ENCODER_RESOURCE_ACESS flags) {
+    trackTexture<PreRasterStage>(allocation, flags);
+    return allocation->texture();
+  }
+
+  template<bool PreRasterStage = false>
   TextureView &
   access(Rc<Texture> const &texture, unsigned viewId, DXMT_ENCODER_RESOURCE_ACESS flags) {
     auto allocation = texture->current();
+    trackTexture<PreRasterStage>(allocation, flags);
+    return texture->view(viewId, allocation);
+  }
+
+  template<bool PreRasterStage = false>
+  TextureView &
+  access(Rc<Texture> const &texture, TextureAllocation *allocation, unsigned viewId, DXMT_ENCODER_RESOURCE_ACESS flags) {
     trackTexture<PreRasterStage>(allocation, flags);
     return texture->view(viewId, allocation);
   }
@@ -515,6 +530,16 @@ public:
     };
   }
 
+  template <PipelineStage stage, PipelineKind kind>
+  void
+  makeResident(TextureView &view, bool read = true, bool write = false) {
+    uint64_t encoder_id = currentEncoder()->id;
+    DXMT_RESOURCE_RESIDENCY requested = GetResidencyMask<kind>(stage, read, write);
+    if (CheckResourceResidency(view.residency, encoder_id, requested)) {
+      makeResident<stage, kind>(view.texture, requested);
+    };
+  }
+
   template <typename cmd_struct>
   cmd_struct &
   encodeRenderCommand() {
@@ -585,6 +610,7 @@ public:
   };
 
   void present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata);
+  void present(Rc<Texture> &texture, TextureAllocation *allocation, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata);
 
   void upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, WMT::Reference<WMT::FXSpatialScaler> &scaler);
 
@@ -604,8 +630,12 @@ public:
   };
 
   void clearColor(Rc<Texture> &&texture, unsigned viewId, unsigned arrayLength, WMTClearColor color);
+  void clearColor(Rc<Texture> &&texture, TextureAllocation *allocation, unsigned viewId, unsigned arrayLength, WMTClearColor color);
   void clearDepthStencil(
       Rc<Texture> &&texture, unsigned viewId, unsigned arrayLength, unsigned flag, float depth, uint8_t stencil
+  );
+  void clearDepthStencil(
+      Rc<Texture> &&texture, TextureAllocation *allocation, unsigned viewId, unsigned arrayLength, unsigned flag, float depth, uint8_t stencil
   );
   void resolveTexture(Rc<Texture> &&src, TextureViewKey src_view, Rc<Texture> &&dst, TextureViewKey dst_view);
 
@@ -677,6 +707,12 @@ public:
     if constexpr (ComputeCommandEncoder)
       return reinterpret_cast<ComputeEncoderData *>(encoder_current)->allocated_argbuf;
     return reinterpret_cast<RenderEncoderData *>(encoder_current)->allocated_argbuf;
+  }
+
+  // Get GPU address of a region within the current argument buffer
+  uint64_t
+  getArgumentBufferGPUAddress(size_t offset) {
+    return reinterpret_cast<RenderEncoderData *>(encoder_current)->allocated_argbuf_gpu_base + offset;
   }
 
   std::pair<WMT::Buffer , size_t> allocateTempBuffer(size_t size, size_t alignment);
@@ -771,10 +807,8 @@ private:
   void *dummy_cbuffer_host_;
   WMTBufferInfo dummy_cbuffer_info_;
 
-  EncoderData encoder_head = {EncoderType::Null, nullptr};
-  EncoderData *encoder_last = &encoder_head;
+  std::vector<EncoderData *> encoder_list_;
   EncoderData *encoder_current = nullptr;
-  unsigned encoder_count_ = 0;
 
   uint64_t seq_id_;
   uint64_t frame_id_;

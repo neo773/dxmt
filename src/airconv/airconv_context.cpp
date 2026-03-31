@@ -16,13 +16,13 @@
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h"
 #include "llvm/Transforms/IPO/DeadArgumentElimination.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/IPO/SCCP.h"
 #include "llvm/Transforms/IPO/Annotation2Metadata.h"
 #include "llvm/Transforms/IPO/ForceFunctionAttrs.h"
 #include "llvm/Transforms/IPO/InferFunctionAttrs.h"
-#include "llvm/Transforms/Utils/Mem2Reg.h"
 
 #include "airconv_context.hpp"
 
@@ -131,20 +131,29 @@ runOptimizationPasses(llvm::Module &M) {
   MPM.addPass(AlwaysInlinerPass());
   MPM.addPass(IPSCCPPass());
   MPM.addPass(GlobalOptPass());
-  MPM.addPass(createModuleToFunctionPassAdaptor(PromotePass()));
   MPM.addPass(DeadArgumentEliminationPass());
 
   {
-    // Create a small function pass pipeline to cleanup after all the global
-    // optimizations.
+    // Post-inline cleanup: SROA subsumes Mem2Reg and decomposes aggregate
+    // allocas introduced by inlined code into individual SSA values.
+    FunctionPassManager PostInlineFPM;
+    PostInlineFPM.addPass(SROAPass());
+    PostInlineFPM.addPass(InstCombinePass());
+    PostInlineFPM.addPass(EarlyCSEPass());
+    PostInlineFPM.addPass(SimplifyCFGPass());
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(PostInlineFPM), true));
+  }
+
+  {
     FunctionPassManager GlobalCleanupPM;
     GlobalCleanupPM.addPass(InstCombinePass());
+    GlobalCleanupPM.addPass(AggressiveInstCombinePass());
 
     GlobalCleanupPM.addPass(SimplifyCFGPass(SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
 
     GlobalCleanupPM.addPass(air::Lower16BitTexReadPass());
 
-    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(GlobalCleanupPM), true /* ? */));
+    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(GlobalCleanupPM), true));
   }
 
   // MPM.addPass(VerifierPass());

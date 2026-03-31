@@ -1096,7 +1096,7 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandDrawMeshThreadgroups,
   WMTRenderCommandDrawMeshThreadgroupsIndirect,
   WMTRenderCommandMemoryBarrier,
-  Unused0,
+  WMTRenderCommandSetFragmentSamplerState,
   Unused1,
   Unused2,
   WMTRenderCommandDXMTGeometryDraw,
@@ -1159,6 +1159,14 @@ struct wmtcmd_render_settexture {
   uint16_t reserved[3];
   struct WMTMemoryPointer next;
   obj_handle_t texture;
+  uint8_t index;
+};
+
+struct wmtcmd_render_setsamplerstate {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t sampler_state;
   uint8_t index;
 };
 
@@ -1839,6 +1847,10 @@ WINEMETAL_API obj_handle_t DispatchData_alloc_init(uint64_t native_ptr, uint64_t
 WINEMETAL_API obj_handle_t CacheReader_alloc_init(const char *path, uint64_t version);
 
 WINEMETAL_API obj_handle_t CacheReader_get(obj_handle_t reader, const void *key, uint64_t length);
+
+WINEMETAL_API uint64_t CacheReader_preload(obj_handle_t reader, obj_handle_t device);
+
+WINEMETAL_API obj_handle_t CacheReader_getPreloaded(obj_handle_t reader, const void *key, uint64_t key_length);
 
 WINEMETAL_API obj_handle_t CacheWriter_alloc_init(const char *path, uint64_t version);
 

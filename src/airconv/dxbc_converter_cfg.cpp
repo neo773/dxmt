@@ -59,6 +59,7 @@ to_shader_scaler_type(microsoft::D3D10_SB_RESOURCE_RETURN_TYPE type) {
     break;
   }
   assert(0 && "invalid D3D10_SB_RESOURCE_RETURN_TYPE");
+  __builtin_unreachable();
 };
 
 std::vector<std::unique_ptr<BasicBlock>>
@@ -325,7 +326,7 @@ read_control_flow(
     case D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER: {
       unsigned RangeID = Inst.m_Operands[0].m_Index[0].m_RegIndex;
       unsigned CBufferSize = Inst.m_ConstantBufferDecl.Size;
-      unsigned LB, RangeSize;
+      unsigned LB = 0, RangeSize = 0;
       switch (Inst.m_Operands[0].m_IndexDimension) {
       case D3D10_SB_OPERAND_INDEX_2D: // SM 5.0-
         LB = RangeID;
@@ -351,7 +352,7 @@ read_control_flow(
     case D3D10_SB_OPCODE_DCL_SAMPLER: {
       // Root signature bindings.
       unsigned RangeID = Inst.m_Operands[0].m_Index[0].m_RegIndex;
-      unsigned LB, RangeSize;
+      unsigned LB = 0, RangeSize = 0;
       switch (Inst.m_Operands[0].m_IndexDimension) {
       case D3D10_SB_OPERAND_INDEX_1D: // SM 5.0-
         LB = RangeID;

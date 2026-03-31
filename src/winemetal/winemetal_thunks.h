@@ -324,6 +324,19 @@ struct unixcall_cache_get {
   obj_handle_t ret_data;
 };
 
+struct unixcall_cache_preload {
+  obj_handle_t cache;
+  obj_handle_t device;
+  uint64_t ret_count;
+};
+
+struct unixcall_cache_get_preloaded {
+  obj_handle_t cache;
+  struct WMTConstMemoryPointer key;
+  uint64_t key_length;
+  obj_handle_t ret_library;
+};
+
 struct unixcall_cache_set {
   obj_handle_t cache;
   struct WMTConstMemoryPointer key;
