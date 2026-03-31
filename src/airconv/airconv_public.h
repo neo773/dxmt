@@ -192,6 +192,8 @@ enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE {
   SM50_SHADER_GS_PASS_THROUGH = 5,
   SM50_SHADER_PSO_GEOMETRY_SHADER = 6,
   SM50_SHADER_PSO_TESSELLATOR = 7,
+  SM30_SHADER_ALPHA_TEST = 8,
+  SM30_SHADER_FOG = 9,
   SM50_SHADER_ARGUMENT_TYPE_MAX = 0xffffffff,
 };
 
@@ -284,6 +286,18 @@ struct SM50_SHADER_PSO_TESSELLATOR_DATA {
   uint32_t max_potential_tess_factor;
 };
 
+struct SM30_SHADER_ALPHA_TEST_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint8_t alpha_test_func; // 0=disabled, 1-8 = D3DCMP_*
+};
+
+struct SM30_SHADER_FOG_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint8_t fog_mode; // 0=disabled, 1=vertex (FOG0), 2=table EXP, 3=table EXP2, 4=table LINEAR
+};
+
 AIRCONV_API int SM50Initialize(
   const void *pBytecode, size_t BytecodeSize, sm50_shader_t *ppShader,
   struct MTL_SHADER_REFLECTION *pRefl, sm50_error_t *ppError
@@ -325,6 +339,104 @@ AIRCONV_API int SM50CompileGeometryPipelineGeometry(
 AIRCONV_API void SM50GetArgumentsInfo(
   sm50_shader_t pShader, struct MTL_SM50_SHADER_ARGUMENT *pConstantBuffers,
   struct MTL_SM50_SHADER_ARGUMENT *pArguments
+);
+
+/* SM30 (SM1-3) shader API */
+typedef sm50_ptr64_t sm30_shader_t;
+
+AIRCONV_API int SM30Initialize(
+  const void *pBytecode, size_t BytecodeSize,
+  sm30_shader_t *ppShader, sm50_error_t *ppError
+);
+AIRCONV_API void SM30Destroy(sm30_shader_t pShader);
+
+struct SM30_INPUT_DECL {
+  uint32_t reg;
+  uint32_t usage;       /* D3DDECLUSAGE */
+  uint32_t usageIndex;
+};
+AIRCONV_API uint32_t SM30GetInputDeclCount(sm30_shader_t pShader);
+AIRCONV_API void SM30GetInputDecls(sm30_shader_t pShader, struct SM30_INPUT_DECL *pDecls);
+AIRCONV_API uint32_t SM30GetPSMaxTexcoordCount(sm30_shader_t pShader);
+AIRCONV_API uint32_t SM30GetVSHasFogOutput(sm30_shader_t pShader);
+
+struct SM30_SAMPLER_DECL {
+  uint32_t reg;
+  uint32_t textureType; /* D3DSAMPLERSTATETYPE */
+};
+AIRCONV_API uint32_t SM30GetSamplerDeclCount(sm30_shader_t pShader);
+AIRCONV_API void SM30GetSamplerDecls(sm30_shader_t pShader, struct SM30_SAMPLER_DECL *pDecls);
+AIRCONV_API uint32_t SM30GetMaxConstantRegister(sm30_shader_t pShader);
+
+AIRCONV_API int SM30Compile(
+  sm30_shader_t pShader,
+  struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
+  const char *FunctionName,
+  sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
+);
+
+/* D3D9 Fixed-Function pipeline shader generation */
+
+struct D3D9_FF_VS_KEY {
+  uint8_t has_position_t;
+  uint8_t has_normal;
+  uint8_t has_color0, has_color1;
+  uint8_t tex_coord_count;
+  uint8_t fog_mode;
+  uint8_t lighting_enabled;
+  uint8_t num_active_lights;
+  uint8_t normalize_normals;
+  uint8_t light_types[8];
+  uint8_t diffuse_source;
+  uint8_t ambient_source;
+  uint8_t specular_source;
+  uint8_t emissive_source;
+  uint8_t color_vertex;
+  uint8_t tci_modes[8];  /* TCI generation mode per texcoord output (0=passthru, 1=cameraspacenormal, 2=cameraspaceposition, 3=cameraspacereflection) */
+  uint8_t tci_coord_indices[8]; /* low bits of TEXCOORDINDEX: which coord set to use for passthru */
+  uint8_t ttf_modes[8]; /* D3DTSS_TEXTURETRANSFORMFLAGS per texcoord (0=disable, 2=count2, 3=count3) */
+};
+
+struct D3D9_FF_VS_ELEMENT {
+  uint8_t usage;        /* D3DDECLUSAGE */
+  uint8_t usage_index;
+  uint8_t type;         /* D3DDECLTYPE */
+  uint8_t stream;
+  uint16_t offset;
+  uint16_t padding;
+};
+
+struct D3D9_FF_PS_STAGE {
+  uint8_t color_op, color_arg1, color_arg2;
+  uint8_t alpha_op, alpha_arg1, alpha_arg2;
+  uint8_t has_texture;
+  uint8_t texcoord_index;
+};
+
+struct D3D9_FF_PS_KEY {
+  struct D3D9_FF_PS_STAGE stages[8];
+  uint8_t tex_coord_count;
+  uint8_t specular_enable;
+  uint8_t alpha_test_enable, alpha_test_func;
+  uint8_t fog_enable;
+};
+
+AIRCONV_API int D3D9FFCompileVS(
+  const struct D3D9_FF_VS_KEY *pKey,
+  const struct D3D9_FF_VS_ELEMENT *pElements,
+  uint32_t numElements,
+  uint32_t slotMask,
+  const char *FunctionName,
+  struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
+  sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
+);
+
+AIRCONV_API int D3D9FFCompilePS(
+  const struct D3D9_FF_PS_KEY *pKey,
+  uint8_t texcoordCount,
+  const char *FunctionName,
+  struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
+  sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
 );
 
 #ifdef __cplusplus

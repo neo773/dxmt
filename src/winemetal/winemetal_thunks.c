@@ -1025,7 +1025,7 @@ CacheReader_preload(obj_handle_t reader, obj_handle_t device) {
   struct unixcall_cache_preload params = {};
   params.cache = reader;
   params.device = device;
-  UNIX_CALL(131, &params);
+  UNIX_CALL(143, &params);
   return params.ret_count;
 }
 
@@ -1035,7 +1035,7 @@ CacheReader_getPreloaded(obj_handle_t reader, const void *key, uint64_t key_leng
   params.cache = reader;
   WMT_MEMPTR_SET(params.key, key);
   params.key_length = key_length;
-  UNIX_CALL(132, &params);
+  UNIX_CALL(144, &params);
   return params.ret_library;
 }
 

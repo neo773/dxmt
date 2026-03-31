@@ -18,6 +18,18 @@ enum airconv_unixcalls {
   unix_sm50_compile_tessellation_hull,
   unix_sm50_compile_tessellation_domain,
   unix_sm50_get_arguments_info = 88,
+  unix_sm30_initialize = 131,
+  unix_sm30_destroy,
+  unix_sm30_compile,
+  unix_d3d9_ff_compile_vs,
+  unix_d3d9_ff_compile_ps,
+  unix_sm30_get_input_decl_count,
+  unix_sm30_get_input_decls,
+  unix_sm30_get_ps_max_texcoord_count,
+  unix_sm30_get_vs_has_fog_output,
+  unix_sm30_get_sampler_decl_count,
+  unix_sm30_get_sampler_decls,
+  unix_sm30_get_max_constant_register,
 };
 
 struct sm50_initialize_params {
@@ -229,6 +241,145 @@ struct sm50_get_arguments_info_params32 {
 };
 
 COMPATIBLE_STRUCT32(sm50_get_arguments_info_params, 16)
+
+struct sm30_initialize_params {
+  const void *bytecode;
+  size_t bytecode_size;
+  sm30_shader_t *shader;
+  sm50_error_t *error;
+  int ret;
+};
+
+struct sm30_destroy_params {
+  sm30_shader_t shader;
+};
+
+struct sm30_compile_params {
+  sm30_shader_t shader;
+  void *args;
+  const char *func_name;
+  sm50_bitcode_t *bitcode;
+  sm50_error_t *error;
+  int ret;
+};
+
+struct sm30_initialize_params32 {
+  uint32_t bytecode;
+  unsigned int bytecode_size;
+  uint32_t shader;
+  uint32_t error;
+  int ret;
+};
+
+COMPATIBLE_STRUCT32(sm30_initialize_params, 20)
+
+struct sm30_compile_params32 {
+  sm30_shader_t shader;
+  uint32_t args;
+  uint32_t func_name;
+  uint32_t bitcode;
+  uint32_t error;
+  int ret;
+};
+
+COMPATIBLE_STRUCT32(sm30_compile_params, 32)
+
+struct sm30_get_input_decl_count_params {
+  sm30_shader_t shader;
+  uint32_t ret;
+};
+
+struct sm30_get_input_decls_params {
+  sm30_shader_t shader;
+  struct SM30_INPUT_DECL *decls;
+};
+
+struct sm30_get_input_decls_params32 {
+  sm30_shader_t shader;
+  uint32_t decls;
+};
+
+COMPATIBLE_STRUCT32(sm30_get_input_decls_params, 16)
+
+struct sm30_get_ps_max_texcoord_count_params {
+  sm30_shader_t shader;
+  uint32_t ret;
+};
+
+struct sm30_get_vs_has_fog_output_params {
+  sm30_shader_t shader;
+  uint32_t ret;
+};
+
+struct sm30_get_sampler_decl_count_params {
+  sm30_shader_t shader;
+  uint32_t ret;
+};
+
+struct sm30_get_sampler_decls_params {
+  sm30_shader_t shader;
+  struct SM30_SAMPLER_DECL *decls;
+};
+
+struct sm30_get_sampler_decls_params32 {
+  sm30_shader_t shader;
+  uint32_t decls;
+};
+
+COMPATIBLE_STRUCT32(sm30_get_sampler_decls_params, 16)
+
+struct sm30_get_max_constant_register_params {
+  sm30_shader_t shader;
+  uint32_t ret;
+};
+
+struct d3d9_ff_compile_vs_params {
+  const void *key;
+  const void *elements;
+  uint32_t num_elements;
+  uint32_t slot_mask;
+  const char *func_name;
+  void *args;
+  sm50_bitcode_t *bitcode;
+  sm50_error_t *error;
+  int ret;
+};
+
+struct d3d9_ff_compile_ps_params {
+  const void *key;
+  uint8_t texcoord_count;
+  const char *func_name;
+  void *args;
+  sm50_bitcode_t *bitcode;
+  sm50_error_t *error;
+  int ret;
+};
+
+struct d3d9_ff_compile_vs_params32 {
+  uint32_t key;
+  uint32_t elements;
+  uint32_t num_elements;
+  uint32_t slot_mask;
+  uint32_t func_name;
+  uint32_t args;
+  uint32_t bitcode;
+  uint32_t error;
+  int ret;
+};
+
+COMPATIBLE_STRUCT32(d3d9_ff_compile_vs_params, 36)
+
+struct d3d9_ff_compile_ps_params32 {
+  uint32_t key;
+  uint8_t texcoord_count;
+  uint32_t func_name;
+  uint32_t args;
+  uint32_t bitcode;
+  uint32_t error;
+  int ret;
+};
+
+COMPATIBLE_STRUCT32(d3d9_ff_compile_ps_params, 28)
 
 #define UNIX_CALL(code, params) WINE_UNIX_CALL(unix_##code, params)
 
