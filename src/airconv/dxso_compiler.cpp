@@ -332,8 +332,9 @@ static void compileVertexShader(
   auto *constBufFloat4 = builder.CreateBitCast(
     constBufRaw, float4Ty->getPointerTo((uint32_t)AddressSpace::constant));
 
-  // Pre-scan for Def instructions to collect inline constants
+  // Pre-scan for Def/DefI instructions to collect inline constants
   std::unordered_map<uint32_t, std::array<float, 4>> defConstants;
+  std::unordered_map<uint32_t, std::array<int32_t, 4>> defIConstants;
   {
     DxsoDecoder defScan(shader->fullTokens.data());
     DxsoInstructionContext defCtx;
@@ -342,6 +343,11 @@ static void compileVertexShader(
         defConstants[defCtx.dst.id.num] = {
           defCtx.def.float32[0], defCtx.def.float32[1],
           defCtx.def.float32[2], defCtx.def.float32[3]
+        };
+      } else if (defCtx.instruction.opcode == DxsoOpcode::DefI) {
+        defIConstants[defCtx.dst.id.num] = {
+          defCtx.def.int32[0], defCtx.def.int32[1],
+          defCtx.def.int32[2], defCtx.def.int32[3]
         };
       }
     }
@@ -637,17 +643,21 @@ static void compileVertexShader(
     }
 
     case DxsoOpcode::Rcp: {
+      // D3D9 rcp replicates scalar result: dst = 1.0 / src.x (splatted)
       auto *src = loadSrc(inst.src[0]);
-      auto *one = ConstantFP::get(types._float, 1.0);
-      auto *oneVec = ConstantVector::getSplat(ElementCount::getFixed(4), one);
-      storeDst(inst.dst, builder.CreateFDiv(oneVec, src));
+      auto *scalar = builder.CreateExtractElement(src, builder.getInt32(0));
+      auto *rcp = builder.CreateFDiv(ConstantFP::get(types._float, 1.0), scalar);
+      storeDst(inst.dst, builder.CreateVectorSplat(4, rcp));
       break;
     }
 
     case DxsoOpcode::Rsq: {
-      // D3D9: rsq operates on abs(src)
+      // D3D9 rsq replicates scalar result: dst = rsqrt(abs(src.x)) (splatted)
       auto *src = loadSrc(inst.src[0]);
-      storeDst(inst.dst, air.CreateFPUnOp(air.rsqrt, air.CreateFPUnOp(air.fabs, src)));
+      auto *scalar = builder.CreateExtractElement(src, builder.getInt32(0));
+      auto *absScalar = air.CreateFPUnOp(air.fabs, scalar);
+      auto *rsq = air.CreateFPUnOp(air.rsqrt, absScalar);
+      storeDst(inst.dst, builder.CreateVectorSplat(4, rsq));
       break;
     }
 
@@ -931,17 +941,17 @@ static void compileVertexShader(
     }
     case DxsoOpcode::Loop: {
       // Loop aL, iN — iN.x=count, iN.y=initial, iN.z=step
-      // For now, load integer constants from the constant buffer
-      // (integer constants are not yet fully supported — use iteration count only)
       auto *header_bb = BasicBlock::Create(context, "loop_header", function);
       auto *body_bb = BasicBlock::Create(context, "loop_body", function);
       auto *exit_bb = BasicBlock::Create(context, "loop_exit", function);
 
-      // Allocate loop counter
       auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "loop_ctr");
-      // Load iteration count from integer constant register (src[0])
-      // For now, default to a fixed iteration count since integer constants aren't piped through
-      uint32_t iterCount = 255; // safe fallback
+      uint32_t iterCount = 255;
+      // Read iteration count from DefI if available
+      uint32_t iReg = inst.src[0].id.num;
+      auto defIt = defIConstants.find(iReg);
+      if (defIt != defIConstants.end())
+        iterCount = std::max(0, std::min((int)defIt->second[0], 255));
       builder.CreateStore(builder.getInt32(iterCount), counter);
 
       builder.CreateBr(header_bb);
@@ -970,6 +980,10 @@ static void compileVertexShader(
       auto *exit_bb = BasicBlock::Create(context, "rep_exit", function);
       auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "rep_ctr");
       uint32_t iterCount = 255;
+      uint32_t iReg = inst.src[0].id.num;
+      auto defIt = defIConstants.find(iReg);
+      if (defIt != defIConstants.end())
+        iterCount = std::max(0, std::min((int)defIt->second[0], 255));
       builder.CreateStore(builder.getInt32(iterCount), counter);
       builder.CreateBr(header_bb);
       builder.SetInsertPoint(header_bb);
@@ -1420,8 +1434,9 @@ static void compilePixelShader(
     ps_argbuf_type->getElementType(ps_ab_cbuf_size),
     builder.CreateStructGEP(ps_argbuf_type, ps_argbuf_ptr, ps_ab_cbuf_size));
 
-  // Pre-scan for Def instructions
+  // Pre-scan for Def/DefI instructions
   std::unordered_map<uint32_t, std::array<float, 4>> psDefConstants;
+  std::unordered_map<uint32_t, std::array<int32_t, 4>> psDefIConstants;
   {
     DxsoDecoder defScan(shader->fullTokens.data());
     DxsoInstructionContext defCtx;
@@ -1430,6 +1445,11 @@ static void compilePixelShader(
         psDefConstants[defCtx.dst.id.num] = {
           defCtx.def.float32[0], defCtx.def.float32[1],
           defCtx.def.float32[2], defCtx.def.float32[3]
+        };
+      } else if (defCtx.instruction.opcode == DxsoOpcode::DefI) {
+        psDefIConstants[defCtx.dst.id.num] = {
+          defCtx.def.int32[0], defCtx.def.int32[1],
+          defCtx.def.int32[2], defCtx.def.int32[3]
         };
       }
     }
@@ -1704,16 +1724,17 @@ static void compilePixelShader(
 
     case DxsoOpcode::Rcp: {
       auto *src = loadSrc(psInst.src[0]);
-      auto *one = ConstantFP::get(types._float, 1.0);
-      auto *oneVec = ConstantVector::getSplat(ElementCount::getFixed(4), one);
-      storeDst(psInst.dst, builder.CreateFDiv(oneVec, src));
+      auto *scalar = builder.CreateExtractElement(src, builder.getInt32(0));
+      auto *rcp = builder.CreateFDiv(ConstantFP::get(types._float, 1.0), scalar);
+      storeDst(psInst.dst, builder.CreateVectorSplat(4, rcp));
       break;
     }
 
     case DxsoOpcode::Rsq: {
-      // D3D9: rsq operates on abs(src)
       auto *src = loadSrc(psInst.src[0]);
-      storeDst(psInst.dst, air.CreateFPUnOp(air.rsqrt, air.CreateFPUnOp(air.fabs, src)));
+      auto *scalar = builder.CreateExtractElement(src, builder.getInt32(0));
+      auto *rsq = air.CreateFPUnOp(air.rsqrt, air.CreateFPUnOp(air.fabs, scalar));
+      storeDst(psInst.dst, builder.CreateVectorSplat(4, rsq));
       break;
     }
 
@@ -1992,7 +2013,13 @@ static void compilePixelShader(
       auto *body_bb = BasicBlock::Create(context, "loop_body", function);
       auto *exit_bb = BasicBlock::Create(context, "loop_exit", function);
       auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "loop_ctr");
-      builder.CreateStore(builder.getInt32(255), counter);
+      uint32_t iterCount = 255;
+      { uint32_t iReg = psInst.src[0].id.num;
+        auto defIt = psDefIConstants.find(iReg);
+        if (defIt != psDefIConstants.end())
+          iterCount = std::max(0, std::min((int)defIt->second[0], 255));
+      }
+      builder.CreateStore(builder.getInt32(iterCount), counter);
       builder.CreateBr(header_bb);
       builder.SetInsertPoint(header_bb);
       auto *ctr = builder.CreateLoad(builder.getInt32Ty(), counter);
@@ -2017,7 +2044,13 @@ static void compilePixelShader(
       auto *body_bb = BasicBlock::Create(context, "rep_body", function);
       auto *exit_bb = BasicBlock::Create(context, "rep_exit", function);
       auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "rep_ctr");
-      builder.CreateStore(builder.getInt32(255), counter);
+      uint32_t iterCount = 255;
+      { uint32_t iReg = psInst.src[0].id.num;
+        auto defIt = psDefIConstants.find(iReg);
+        if (defIt != psDefIConstants.end())
+          iterCount = std::max(0, std::min((int)defIt->second[0], 255));
+      }
+      builder.CreateStore(builder.getInt32(iterCount), counter);
       builder.CreateBr(header_bb);
       builder.SetInsertPoint(header_bb);
       auto *ctr = builder.CreateLoad(builder.getInt32Ty(), counter);
