@@ -470,6 +470,11 @@ private:
     WMTStencilOperation depth_fail;
     uint8_t stencil_read_mask;
     uint8_t stencil_write_mask;
+    bool two_sided;
+    WMTCompareFunction back_stencil_func;
+    WMTStencilOperation back_stencil_pass;
+    WMTStencilOperation back_stencil_fail;
+    WMTStencilOperation back_depth_fail;
     bool operator==(const DSKey &) const = default;
   };
   struct DSKeyHash {
@@ -478,8 +483,10 @@ private:
                    ((uint64_t)k.stencil_enabled << 5) | ((uint64_t)k.stencil_func << 6) |
                    ((uint64_t)k.stencil_pass << 10) | ((uint64_t)k.stencil_fail << 14) |
                    ((uint64_t)k.depth_fail << 18) | ((uint64_t)k.stencil_read_mask << 22) |
-                   ((uint64_t)k.stencil_write_mask << 30);
-      return std::hash<uint64_t>{}(v);
+                   ((uint64_t)k.stencil_write_mask << 30) | ((uint64_t)k.two_sided << 38);
+      uint64_t v2 = ((uint64_t)k.back_stencil_func) | ((uint64_t)k.back_stencil_pass << 4) |
+                    ((uint64_t)k.back_stencil_fail << 8) | ((uint64_t)k.back_depth_fail << 12);
+      return std::hash<uint64_t>{}(v) ^ (std::hash<uint64_t>{}(v2) * 2654435761u);
     }
   };
   std::unordered_map<DSKey, obj_handle_t, DSKeyHash> ds_cache_;

@@ -183,6 +183,11 @@ D3D9Device::D3D9Device(IDirect3D9 *pD3D9, HWND hFocusWindow, D3DPRESENT_PARAMETE
   render_states_[D3DRS_STENCILPASS] = D3DSTENCILOP_KEEP;
   render_states_[D3DRS_STENCILFAIL] = D3DSTENCILOP_KEEP;
   render_states_[D3DRS_STENCILZFAIL] = D3DSTENCILOP_KEEP;
+  render_states_[D3DRS_TWOSIDEDSTENCILMODE] = FALSE;
+  render_states_[D3DRS_CCW_STENCILFUNC] = D3DCMP_ALWAYS;
+  render_states_[D3DRS_CCW_STENCILPASS] = D3DSTENCILOP_KEEP;
+  render_states_[D3DRS_CCW_STENCILFAIL] = D3DSTENCILOP_KEEP;
+  render_states_[D3DRS_CCW_STENCILZFAIL] = D3DSTENCILOP_KEEP;
   render_states_[D3DRS_SCISSORTESTENABLE] = FALSE;
   render_states_[D3DRS_TEXTUREFACTOR] = 0xFFFFFFFF;
 
@@ -724,6 +729,9 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, D
   case D3DRS_STENCILENABLE: case D3DRS_STENCILFUNC:
   case D3DRS_STENCILPASS: case D3DRS_STENCILFAIL: case D3DRS_STENCILZFAIL:
   case D3DRS_STENCILMASK: case D3DRS_STENCILWRITEMASK: case D3DRS_STENCILREF:
+  case D3DRS_TWOSIDEDSTENCILMODE:
+  case D3DRS_CCW_STENCILFUNC: case D3DRS_CCW_STENCILPASS:
+  case D3DRS_CCW_STENCILFAIL: case D3DRS_CCW_STENCILZFAIL:
     dsso_dirty_ = true;
     break;
   case D3DRS_CULLMODE:
@@ -741,7 +749,6 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, D
     case D3DRS_WRAP4: case D3DRS_WRAP5: case D3DRS_WRAP6: case D3DRS_WRAP7:
     case D3DRS_CLIPPING:
     case D3DRS_POINTSIZE:
-    case D3DRS_TWOSIDEDSTENCILMODE:
       Logger::warn(str::format("D3D9: unhandled render state ", State, " = ", Value));
       warned[State] = true;
       break;
@@ -2301,6 +2308,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     obj_handle_t dsso = 0;
     if (depth_enable) {
       bool stencilEnabled = render_states_[D3DRS_STENCILENABLE] != 0;
+      bool twoSided = render_states_[D3DRS_TWOSIDEDSTENCILMODE] != 0;
       DSKey dsKey{
         .depth_func = (WMTCompareFunction)(render_states_[D3DRS_ZFUNC] - 1),
         .depth_write = render_states_[D3DRS_ZWRITEENABLE] != 0,
@@ -2311,6 +2319,11 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
         .depth_fail = ConvertStencilOp(render_states_[D3DRS_STENCILZFAIL]),
         .stencil_read_mask = (uint8_t)render_states_[D3DRS_STENCILMASK],
         .stencil_write_mask = (uint8_t)render_states_[D3DRS_STENCILWRITEMASK],
+        .two_sided = twoSided && stencilEnabled,
+        .back_stencil_func = (WMTCompareFunction)(render_states_[D3DRS_CCW_STENCILFUNC] - 1),
+        .back_stencil_pass = ConvertStencilOp(render_states_[D3DRS_CCW_STENCILPASS]),
+        .back_stencil_fail = ConvertStencilOp(render_states_[D3DRS_CCW_STENCILFAIL]),
+        .back_depth_fail = ConvertStencilOp(render_states_[D3DRS_CCW_STENCILZFAIL]),
       };
       auto it = ds_cache_.find(dsKey);
       if (it != ds_cache_.end()) {
@@ -2327,7 +2340,17 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
           dsInfo.front_stencil.depth_fail_op = dsKey.depth_fail;
           dsInfo.front_stencil.read_mask = dsKey.stencil_read_mask;
           dsInfo.front_stencil.write_mask = dsKey.stencil_write_mask;
-          dsInfo.back_stencil = dsInfo.front_stencil;
+          if (dsKey.two_sided) {
+            dsInfo.back_stencil.enabled = true;
+            dsInfo.back_stencil.stencil_compare_function = dsKey.back_stencil_func;
+            dsInfo.back_stencil.depth_stencil_pass_op = dsKey.back_stencil_pass;
+            dsInfo.back_stencil.stencil_fail_op = dsKey.back_stencil_fail;
+            dsInfo.back_stencil.depth_fail_op = dsKey.back_depth_fail;
+            dsInfo.back_stencil.read_mask = dsKey.stencil_read_mask;
+            dsInfo.back_stencil.write_mask = dsKey.stencil_write_mask;
+          } else {
+            dsInfo.back_stencil = dsInfo.front_stencil;
+          }
         }
         dsso = MTLDevice_newDepthStencilState(dxmt_device_->device().handle, &dsInfo);
         ds_cache_[dsKey] = dsso;
