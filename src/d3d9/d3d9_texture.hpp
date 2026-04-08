@@ -443,12 +443,7 @@ public:
   }
 
   HRESULT STDMETHODCALLTYPE GetCubeMapSurface(D3DCUBEMAP_FACES FaceType, UINT Level,
-                                               IDirect3DSurface9 **ppSurface) final {
-    // Stub — games rarely call this directly
-    if (!ppSurface) return D3DERR_INVALIDCALL;
-    *ppSurface = nullptr;
-    return D3DERR_INVALIDCALL;
-  }
+                                               IDirect3DSurface9 **ppSurface) final;
 
   HRESULT STDMETHODCALLTYPE LockRect(D3DCUBEMAP_FACES FaceType, UINT Level,
                                       D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) final {
@@ -493,6 +488,10 @@ public:
   UINT edgeLength() const { return edgeLength_; }
   UINT levelCount() const { return levelCount_; }
   bool isAnyDirty() const { return anyDirty_; }
+  bool isRT() const { return isRenderTarget_; }
+  void setRT() { isRenderTarget_ = true; }
+  TextureViewKey faceRTViewKey(UINT face) const { return faceRTViewKeys_[face]; }
+  void setFaceRTViewKey(UINT face, TextureViewKey key) { faceRTViewKeys_[face] = key; }
 
   void uploadDirtyLevelsStaged(Rc<Texture> &gpuTex, dxmt::CommandQueue &queue) {
     bool compressed = IsCompressedFormat(format_);
@@ -583,10 +582,84 @@ private:
   bool anyDirty_ = false;
   std::vector<MipLevel> faceMips_[6]; // one vector per face
 
+  bool isRenderTarget_ = false;
   Rc<Texture> texture_;
   TextureViewKey viewKey_;
   TextureViewKey srgbViewKey_ = 0;
+  TextureViewKey faceRTViewKeys_[6] = {}; // per-face RT views (2DArray slice views)
 };
+
+// Lightweight surface wrapper for GetCubeMapSurface — delegates Lock/Unlock to parent cube texture face
+class D3D9CubeMapSurface final : public ComObjectClamp<IDirect3DSurface9> {
+public:
+  D3D9CubeMapSurface(D3D9TextureCube *parent, D3DCUBEMAP_FACES face, UINT level)
+      : parent_(parent), face_(face), level_(level) {
+    parent_->AddRef();
+  }
+  ~D3D9CubeMapSurface() {
+    if (parent_) parent_->Release();
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObj) final {
+    if (!ppvObj) return E_POINTER;
+    *ppvObj = nullptr;
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDirect3DResource9) ||
+        riid == __uuidof(IDirect3DSurface9)) {
+      *ppvObj = ref(this);
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+
+  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void *, DWORD, DWORD) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void *, DWORD *) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) final { return D3DERR_INVALIDCALL; }
+  DWORD STDMETHODCALLTYPE SetPriority(DWORD) final { return 0; }
+  DWORD STDMETHODCALLTYPE GetPriority() final { return 0; }
+  void STDMETHODCALLTYPE PreLoad() final {}
+  D3DRESOURCETYPE STDMETHODCALLTYPE GetType() final { return D3DRTYPE_SURFACE; }
+
+  HRESULT STDMETHODCALLTYPE GetContainer(REFIID riid, void **ppContainer) final {
+    if (!ppContainer) return E_POINTER;
+    return parent_->QueryInterface(riid, ppContainer);
+  }
+
+  HRESULT STDMETHODCALLTYPE GetDesc(D3DSURFACE_DESC *pDesc) final {
+    return parent_->GetLevelDesc(level_, pDesc);
+  }
+
+  HRESULT STDMETHODCALLTYPE LockRect(D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) final {
+    return parent_->LockRect(face_, level_, pLockedRect, pRect, Flags);
+  }
+
+  HRESULT STDMETHODCALLTYPE UnlockRect() final {
+    return parent_->UnlockRect(face_, level_);
+  }
+
+  HRESULT STDMETHODCALLTYPE GetDC(HDC *) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE ReleaseDC(HDC) final { return D3DERR_INVALIDCALL; }
+
+  // Internal accessors for render target usage
+  Rc<Texture> &texture() { return parent_->texture(); }
+  TextureViewKey viewKey() const { return parent_->faceRTViewKey(face_); }
+  WMTPixelFormat mtlFormat() const { return parent_->texture()->pixelFormat(); }
+  D3D9TextureCube *parentTexture() const { return parent_; }
+  D3DCUBEMAP_FACES face() const { return face_; }
+
+private:
+  D3D9TextureCube *parent_;
+  D3DCUBEMAP_FACES face_;
+  UINT level_;
+};
+
+// Deferred implementation — needs D3D9CubeMapSurface to be complete
+inline HRESULT STDMETHODCALLTYPE D3D9TextureCube::GetCubeMapSurface(
+    D3DCUBEMAP_FACES FaceType, UINT Level, IDirect3DSurface9 **ppSurface) {
+  if (FaceType > 5 || Level >= levelCount_ || !ppSurface) return D3DERR_INVALIDCALL;
+  *ppSurface = ref(new D3D9CubeMapSurface(this, FaceType, Level));
+  return S_OK;
+}
 
 // ============================================================================
 // Helpers — type-dispatch for bound texture access (2D or Cube)

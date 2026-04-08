@@ -544,9 +544,13 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, I
     return S_OK;
   }
 
+  // Determine surface source: 2D texture surface, cube face surface, or standalone surface
   IDirect3DTexture9 *containerTex = nullptr;
+  IDirect3DCubeTexture9 *containerCube = nullptr;
   bool isTexSurface = SUCCEEDED(pRenderTarget->GetContainer(__uuidof(IDirect3DTexture9), (void **)&containerTex));
   if (containerTex) containerTex->Release();
+  bool isCubeSurface = !isTexSurface && SUCCEEDED(pRenderTarget->GetContainer(__uuidof(IDirect3DCubeTexture9), (void **)&containerCube));
+  if (containerCube) containerCube->Release();
 
   Rc<Texture> rtTex;
   TextureViewKey rtView;
@@ -557,6 +561,11 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, I
     rtTex = texSurf->texture();
     rtView = texSurf->viewKey();
     rtFormat = texSurf->mtlFormat();
+  } else if (isCubeSurface) {
+    auto *cubeSurf = static_cast<D3D9CubeMapSurface *>(pRenderTarget);
+    rtTex = cubeSurf->texture();
+    rtView = cubeSurf->viewKey();
+    rtFormat = cubeSurf->mtlFormat();
   } else {
     auto *surf = static_cast<D3D9Surface *>(pRenderTarget);
     rtTex = surf->texture();
@@ -1001,6 +1010,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateCubeTexture(
   if (mipLevels == 0)
     mipLevels = (UINT)std::floor(std::log2((double)EdgeLength)) + 1;
 
+  bool isRenderTarget = (Usage & D3DUSAGE_RENDERTARGET) != 0;
+
   WMTTextureInfo info = {};
   info.pixel_format = mtlFormat;
   info.width = EdgeLength;
@@ -1010,8 +1021,13 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateCubeTexture(
   info.type = WMTTextureTypeCube;
   info.mipmap_level_count = mipLevels;
   info.sample_count = 1;
-  info.usage = WMTTextureUsageShaderRead;
-  info.options = WMTResourceStorageModeShared;
+  if (isRenderTarget) {
+    info.usage = (WMTTextureUsage)(WMTTextureUsageRenderTarget | WMTTextureUsageShaderRead | WMTTextureUsagePixelFormatView);
+    info.options = WMTResourceStorageModePrivate;
+  } else {
+    info.usage = (WMTTextureUsage)(WMTTextureUsageShaderRead | WMTTextureUsagePixelFormatView);
+    info.options = WMTResourceStorageModeShared;
+  }
 
   auto texture = Rc(new Texture(info, dxmt_device_->device()));
   texture->rename(texture->allocate({}));
@@ -1041,6 +1057,22 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateCubeTexture(
   }
 
   auto *cubeTex = new D3D9TextureCube(this, EdgeLength, Levels, Format, std::move(texture), viewKey);
+
+  if (isRenderTarget) {
+    cubeTex->setRT();
+    // Create per-face RT views as 2DArray slices (Metal renders to individual slices)
+    for (UINT face = 0; face < 6; face++) {
+      auto faceKey = cubeTex->texture()->createView({
+          .format = mtlFormat,
+          .type = WMTTextureType2DArray,
+          .firstMiplevel = 0,
+          .miplevelCount = mipLevels,
+          .firstArraySlice = (uint16_t)face,
+          .arraySize = 1,
+      });
+      cubeTex->setFaceRTViewKey(face, faceKey);
+    }
+  }
 
   // Create sRGB view for formats that support it
   WMTPixelFormat srgbFormat = WMTPixelFormatInvalid;
