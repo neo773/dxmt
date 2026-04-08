@@ -1267,12 +1267,33 @@ static void compilePixelShader(
     "ps_constants", AddressSpace::constant, MemoryAccess::read, msl_float4);
   uint32_t ps_ab_cbuf_size = ps_argbuf.DefineInteger64("ps_const_buf_size");
 
+  // Map DXSO texture type → AIR TextureKind
+  auto dxsoTexKind = [](DxsoTextureType t) -> TextureKind {
+    switch (t) {
+    case DxsoTextureType::TextureCube: return TextureKind::texture_cube;
+    case DxsoTextureType::Texture3D:   return TextureKind::texture_3d;
+    default:                           return TextureKind::texture_2d;
+    }
+  };
+  auto dxsoAirTexKind = [](DxsoTextureType t) -> llvm::air::Texture::ResourceKind {
+    switch (t) {
+    case DxsoTextureType::TextureCube: return llvm::air::Texture::texture_cube;
+    case DxsoTextureType::Texture3D:   return llvm::air::Texture::texture_3d;
+    default:                           return llvm::air::Texture::texture_2d;
+    }
+  };
+
+  // Build per-sampler texture type map from DCLs
+  std::unordered_map<uint32_t, DxsoTextureType> samplerTexTypes;
+  for (auto &sdcl : shader->samplerDecls)
+    samplerTexTypes[sdcl.reg] = sdcl.textureType;
+
   // Define all 8 texture+sampler slots in the argument buffer struct
-  // (unused slots are simply not accessed by the shader)
   uint32_t ps_ab_tex[8], ps_ab_samp[8];
   for (uint32_t i = 0; i < 8; i++) {
+    auto texType = samplerTexTypes.count(i) ? samplerTexTypes[i] : DxsoTextureType::Texture2D;
     ps_ab_tex[i] = ps_argbuf.DefineTexture(
-      "tex" + std::to_string(i), TextureKind::texture_2d,
+      "tex" + std::to_string(i), dxsoTexKind(texType),
       MemoryAccess::sample, msl_float);
     ps_ab_samp[i] = ps_argbuf.DefineSampler("samp" + std::to_string(i));
   }
@@ -1297,7 +1318,7 @@ static void compilePixelShader(
   std::unordered_map<uint32_t, SamplerBinding> samplerBindings;
   for (auto &sdcl : shader->samplerDecls) {
     llvm::air::Texture texDesc{
-      .kind = llvm::air::Texture::texture_2d,
+      .kind = dxsoAirTexKind(sdcl.textureType),
       .sample_type = llvm::air::Texture::sample_float,
       .memory_access = llvm::air::Texture::access_sample,
     };
@@ -1821,12 +1842,22 @@ static void compilePixelShader(
         if (it != samplerBindings.end()) {
           auto &binding = it->second;
           auto *coords = loadSrc(psInst.src[0]);
-          auto *u = builder.CreateExtractElement(coords, builder.getInt32(0));
-          auto *v = builder.CreateExtractElement(coords, builder.getInt32(1));
-          auto *float2Ty = FixedVectorType::get(types._float, 2);
-          Value *coord2d = UndefValue::get(float2Ty);
-          coord2d = builder.CreateInsertElement(coord2d, u, builder.getInt32(0));
-          coord2d = builder.CreateInsertElement(coord2d, v, builder.getInt32(1));
+          Value *texCoord;
+          if (binding.texDesc.kind == llvm::air::Texture::texture_cube ||
+              binding.texDesc.kind == llvm::air::Texture::texture_3d) {
+            auto *float3Ty = FixedVectorType::get(types._float, 3);
+            texCoord = UndefValue::get(float3Ty);
+            for (uint32_t i = 0; i < 3; i++)
+              texCoord = builder.CreateInsertElement(texCoord,
+                builder.CreateExtractElement(coords, builder.getInt32(i)), builder.getInt32(i));
+          } else {
+            auto *float2Ty = FixedVectorType::get(types._float, 2);
+            texCoord = UndefValue::get(float2Ty);
+            texCoord = builder.CreateInsertElement(texCoord,
+              builder.CreateExtractElement(coords, builder.getInt32(0)), builder.getInt32(0));
+            texCoord = builder.CreateInsertElement(texCoord,
+              builder.CreateExtractElement(coords, builder.getInt32(1)), builder.getInt32(1));
+          }
 
           auto *texHandle = builder.CreateLoad(
             ps_argbuf_type->getElementType(binding.texStructIdx),
@@ -1836,7 +1867,7 @@ static void compilePixelShader(
             builder.CreateStructGEP(ps_argbuf_type, ps_argbuf_ptr, binding.sampStructIdx));
           int32_t offsets[3] = {0, 0, 0};
           auto [sampled, residency] = air.CreateSample(
-            binding.texDesc, texHandle, sampHandle, coord2d, nullptr, offsets,
+            binding.texDesc, texHandle, sampHandle, texCoord, nullptr, offsets,
             llvm::air::sample_level{air.getFloat(0)});
           storeDst(psInst.dst, sampled);
         }
