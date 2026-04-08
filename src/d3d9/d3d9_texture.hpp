@@ -129,12 +129,15 @@ public:
   // Internal accessors
   Rc<Texture> &texture() { return texture_; }
   TextureViewKey viewKey() const { return viewKey_; }
+  TextureViewKey srgbViewKey() const { return srgbViewKey_; }
   TextureViewKey rtViewKey() const { return rtViewKey_; }
+  bool hasSrgbView() const { return srgbViewKey_ != 0; }
   UINT width() const { return width_; }
   UINT height() const { return height_; }
   D3DFORMAT format() const { return format_; }
   bool isRT() const { return isRenderTarget_; }
   void setRT(TextureViewKey rtKey) { isRenderTarget_ = true; rtViewKey_ = rtKey; }
+  void setSrgbView(TextureViewKey key) { srgbViewKey_ = key; }
   UINT levelCount() const { return levelCount_; }
 
   bool isAnyDirty() const { return anyDirty_; }
@@ -285,6 +288,7 @@ private:
 
   Rc<Texture> texture_;
   TextureViewKey viewKey_;
+  TextureViewKey srgbViewKey_ = 0;
   TextureViewKey rtViewKey_ = 0;
 };
 

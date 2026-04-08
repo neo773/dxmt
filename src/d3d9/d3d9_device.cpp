@@ -916,9 +916,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateTexture(
       WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleGreen
     };
     viewKey = texture->createViewWithSwizzle(viewDesc, swizzle);
-  } else if (Format == D3DFMT_L8) {
-    // L8 maps to R8Unorm. D3D9 expects luminance replicated to RGB, alpha=1.
-    // Metal sees (R, 0, 0, 1). Apply .rrr1 swizzle.
+  } else if (Format == D3DFMT_L8 || Format == D3DFMT_L16) {
+    // L8/L16 maps to R8/R16Unorm. D3D9 expects luminance replicated to RGB, alpha=1.
     WMTTextureSwizzleChannels swizzle = {
       WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleOne
     };
@@ -939,6 +938,27 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateTexture(
     });
     tex2d->setRT(rtKey);
   }
+
+  // Create sRGB view for formats that support it (for D3DSAMP_SRGBTEXTURE)
+  WMTPixelFormat srgbFormat = WMTPixelFormatInvalid;
+  if (mtlFormat == WMTPixelFormatBGRA8Unorm) srgbFormat = WMTPixelFormatBGRA8Unorm_sRGB;
+  else if (mtlFormat == WMTPixelFormatRGBA8Unorm) srgbFormat = WMTPixelFormatRGBA8Unorm_sRGB;
+  else if (mtlFormat == WMTPixelFormatBC1_RGBA) srgbFormat = WMTPixelFormatBC1_RGBA_sRGB;
+  else if (mtlFormat == WMTPixelFormatBC2_RGBA) srgbFormat = WMTPixelFormatBC2_RGBA_sRGB;
+  else if (mtlFormat == WMTPixelFormatBC3_RGBA) srgbFormat = WMTPixelFormatBC3_RGBA_sRGB;
+  else if (mtlFormat == WMTPixelFormatR8Unorm) srgbFormat = WMTPixelFormatR8Unorm_sRGB;
+  if (srgbFormat != WMTPixelFormatInvalid) {
+    auto srgbKey = tex2d->texture()->createView({
+        .format = srgbFormat,
+        .type = WMTTextureType2DArray,
+        .firstMiplevel = 0,
+        .miplevelCount = mipLevels,
+        .firstArraySlice = 0,
+        .arraySize = 1,
+    });
+    tex2d->setSrgbView(srgbKey);
+  }
+
   *ppTexture = ref(tex2d);
   return S_OK;
 }
@@ -2129,7 +2149,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     for (uint32_t mask = tex_bound_mask_; mask; mask &= mask - 1) {
       uint32_t stage = __builtin_ctz(mask);
       auto *tex = bound_textures_[stage].ptr();
-      tex_captures_[tex_capture_count_++] = {tex->texture().ptr(), tex->viewKey(), stage};
+      bool wantSrgb = sampler_states_[stage][D3DSAMP_SRGBTEXTURE] != 0;
+      TextureViewKey texView = (wantSrgb && tex->hasSrgbView()) ? tex->srgbViewKey() : tex->viewKey();
+      tex_captures_[tex_capture_count_++] = {tex->texture().ptr(), texView, stage};
 
       SamplerKey samplerKey;
       memcpy(samplerKey.state, sampler_states_[stage], sizeof(samplerKey.state));

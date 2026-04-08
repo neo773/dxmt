@@ -51,6 +51,12 @@ inline WMTPixelFormat ConvertD3D9Format(D3DFORMAT format) {
     return WMTPixelFormatRG16Unorm;
   case D3DFMT_A2B10G10R10:
     return WMTPixelFormatRGB10A2Unorm;
+  case D3DFMT_A2R10G10B10:
+    return WMTPixelFormatBGR10A2Unorm;
+  case D3DFMT_G32R32F:
+    return WMTPixelFormatRG32Float;
+  case D3DFMT_L16:
+    return WMTPixelFormatR16Unorm;
   default:
     return WMTPixelFormatInvalid;
   }
@@ -112,7 +118,12 @@ inline uint32_t D3D9FormatBytesPerPixel(D3DFORMAT format) {
   case D3DFMT_G16R16:
     return 4;
   case D3DFMT_A2B10G10R10:
+  case D3DFMT_A2R10G10B10:
     return 4;
+  case D3DFMT_G32R32F:
+    return 8;
+  case D3DFMT_L16:
+    return 2;
   default:
     return 0;
   }
@@ -161,6 +172,9 @@ inline const char *D3D9FormatName(D3DFORMAT format) {
   case D3DFMT_A32B32G32R32F:  return "A32B32G32R32F";
   case D3DFMT_G16R16:         return "G16R16";
   case D3DFMT_A2B10G10R10:    return "A2B10G10R10";
+  case D3DFMT_A2R10G10B10:    return "A2R10G10B10";
+  case D3DFMT_G32R32F:        return "G32R32F";
+  case D3DFMT_L16:            return "L16";
   case D3DFMT_D16:            return "D16";
   case D3DFMT_D16_LOCKABLE:   return "D16_LOCKABLE";
   case D3DFMT_D24S8:          return "D24S8";
