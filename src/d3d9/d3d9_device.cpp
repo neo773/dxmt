@@ -3705,31 +3705,41 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateStateBlock(D3DSTATEBLOCKTYPE Type, I
 
   Logger::debug(str::format("D3D9: CreateStateBlock type=", (int)Type));
 
-  auto *sb = new D3D9StateBlock(this);
+  auto *sb = new D3D9StateBlock(this, Type);
 
-  // Capture current state
+  // Capture current state based on block type
+  bool capturePixel = (Type == D3DSBT_ALL || Type == D3DSBT_PIXELSTATE);
+  bool captureVertex = (Type == D3DSBT_ALL || Type == D3DSBT_VERTEXSTATE);
+
   memcpy(sb->render_states, render_states_, sizeof(render_states_));
-  memcpy(sb->texture_stage_states, texture_stage_states_, sizeof(texture_stage_states_));
-  memcpy(sb->sampler_states, sampler_states_, sizeof(sampler_states_));
-  memcpy(sb->transforms, transforms_, sizeof(transforms_));
-  sb->viewport = viewport_;
-  sb->scissor_rect = scissor_rect_;
-  sb->material = material_;
-  memcpy(sb->lights, lights_, sizeof(lights_));
-  memcpy(sb->light_enabled, light_enabled_, sizeof(light_enabled_));
-  sb->fvf = current_fvf_;
-  memcpy(sb->vs_constants, vsConstants_, sizeof(vsConstants_));
-  memcpy(sb->ps_constants, psConstants_, sizeof(psConstants_));
-  sb->vs = current_vs_;
-  sb->ps = current_ps_;
-  sb->vdecl = current_vdecl_;
-  for (int i = 0; i < 16; i++) {
-    sb->stream_sources[i] = stream_sources_[i];
-    sb->stream_offsets[i] = stream_offsets_[i];
-    sb->stream_strides[i] = stream_strides_[i];
-    sb->textures[i] = bound_textures_[i];
+
+  if (capturePixel) {
+    memcpy(sb->texture_stage_states, texture_stage_states_, sizeof(texture_stage_states_));
+    memcpy(sb->sampler_states, sampler_states_, sizeof(sampler_states_));
+    memcpy(sb->ps_constants, psConstants_, sizeof(psConstants_));
+    sb->ps = current_ps_;
+    for (int i = 0; i < 16; i++)
+      sb->textures[i] = bound_textures_[i];
   }
-  sb->ib = current_ib_;
+
+  if (captureVertex) {
+    memcpy(sb->transforms, transforms_, sizeof(transforms_));
+    sb->viewport = viewport_;
+    sb->scissor_rect = scissor_rect_;
+    sb->material = material_;
+    memcpy(sb->lights, lights_, sizeof(lights_));
+    memcpy(sb->light_enabled, light_enabled_, sizeof(light_enabled_));
+    sb->fvf = current_fvf_;
+    memcpy(sb->vs_constants, vsConstants_, sizeof(vsConstants_));
+    sb->vs = current_vs_;
+    sb->vdecl = current_vdecl_;
+    for (int i = 0; i < 16; i++) {
+      sb->stream_sources[i] = stream_sources_[i];
+      sb->stream_offsets[i] = stream_offsets_[i];
+      sb->stream_strides[i] = stream_strides_[i];
+    }
+    sb->ib = current_ib_;
+  }
 
   *ppSB = ref(sb);
   return S_OK;
@@ -3750,66 +3760,87 @@ HRESULT STDMETHODCALLTYPE D3D9Device::EndStateBlock(IDirect3DStateBlock9 **ppSB)
 
 // D3D9StateBlock::Capture
 HRESULT STDMETHODCALLTYPE D3D9StateBlock::Capture() {
+  bool capturePixel = (type_ == D3DSBT_ALL || type_ == D3DSBT_PIXELSTATE);
+  bool captureVertex = (type_ == D3DSBT_ALL || type_ == D3DSBT_VERTEXSTATE);
+
   memcpy(render_states, device_->render_states_, sizeof(render_states));
-  memcpy(texture_stage_states, device_->texture_stage_states_, sizeof(texture_stage_states));
-  memcpy(sampler_states, device_->sampler_states_, sizeof(sampler_states));
-  memcpy(transforms, device_->transforms_, sizeof(transforms));
-  viewport = device_->viewport_;
-  scissor_rect = device_->scissor_rect_;
-  material = device_->material_;
-  memcpy(lights, device_->lights_, sizeof(lights));
-  memcpy(light_enabled, device_->light_enabled_, sizeof(light_enabled));
-  fvf = device_->current_fvf_;
-  memcpy(vs_constants, device_->vsConstants_, sizeof(vs_constants));
-  memcpy(ps_constants, device_->psConstants_, sizeof(ps_constants));
-  vs = device_->current_vs_;
-  ps = device_->current_ps_;
-  vdecl = device_->current_vdecl_;
-  for (int i = 0; i < 16; i++) {
-    stream_sources[i] = device_->stream_sources_[i];
-    stream_offsets[i] = device_->stream_offsets_[i];
-    stream_strides[i] = device_->stream_strides_[i];
-    textures[i] = device_->bound_textures_[i];
+
+  if (capturePixel) {
+    memcpy(texture_stage_states, device_->texture_stage_states_, sizeof(texture_stage_states));
+    memcpy(sampler_states, device_->sampler_states_, sizeof(sampler_states));
+    memcpy(ps_constants, device_->psConstants_, sizeof(ps_constants));
+    ps = device_->current_ps_;
+    for (int i = 0; i < 16; i++)
+      textures[i] = device_->bound_textures_[i];
   }
-  ib = device_->current_ib_;
+
+  if (captureVertex) {
+    memcpy(transforms, device_->transforms_, sizeof(transforms));
+    viewport = device_->viewport_;
+    scissor_rect = device_->scissor_rect_;
+    material = device_->material_;
+    memcpy(lights, device_->lights_, sizeof(lights));
+    memcpy(light_enabled, device_->light_enabled_, sizeof(light_enabled));
+    fvf = device_->current_fvf_;
+    memcpy(vs_constants, device_->vsConstants_, sizeof(vs_constants));
+    vs = device_->current_vs_;
+    vdecl = device_->current_vdecl_;
+    for (int i = 0; i < 16; i++) {
+      stream_sources[i] = device_->stream_sources_[i];
+      stream_offsets[i] = device_->stream_offsets_[i];
+      stream_strides[i] = device_->stream_strides_[i];
+    }
+    ib = device_->current_ib_;
+  }
+
   return S_OK;
 }
 
 // D3D9StateBlock::Apply
 HRESULT STDMETHODCALLTYPE D3D9StateBlock::Apply() {
+  bool applyPixel = (type_ == D3DSBT_ALL || type_ == D3DSBT_PIXELSTATE);
+  bool applyVertex = (type_ == D3DSBT_ALL || type_ == D3DSBT_VERTEXSTATE);
+
   memcpy(device_->render_states_, render_states, sizeof(render_states));
-  memcpy(device_->texture_stage_states_, texture_stage_states, sizeof(texture_stage_states));
-  memcpy(device_->sampler_states_, sampler_states, sizeof(sampler_states));
-  memcpy(device_->transforms_, transforms, sizeof(transforms));
-  device_->viewport_ = viewport;
-  device_->scissor_rect_ = scissor_rect;
-  device_->material_ = material;
-  memcpy(device_->lights_, lights, sizeof(lights));
-  memcpy(device_->light_enabled_, light_enabled, sizeof(light_enabled));
-  if (fvf) device_->SetFVF(fvf);
-  memcpy(device_->vsConstants_, vs_constants, sizeof(vs_constants));
-  memcpy(device_->psConstants_, ps_constants, sizeof(ps_constants));
-  device_->current_vs_ = vs;
-  device_->current_ps_ = ps;
-  device_->current_vdecl_ = vdecl;
-  for (int i = 0; i < 16; i++) {
-    device_->stream_sources_[i] = stream_sources[i];
-    device_->stream_offsets_[i] = stream_offsets[i];
-    device_->stream_strides_[i] = stream_strides[i];
-    device_->bound_textures_[i] = textures[i];
-  }
-  device_->current_ib_ = ib;
-  // Bump all dirty flags since state was restored by memcpy (bypassing setters)
   device_->pso_dirty_ = true;
   device_->dsso_dirty_ = true;
-  device_->vb_dirty_ = true;
-  device_->tex_dirty_ = true;
-  device_->vp_dirty_ = true;
-  device_->scissor_dirty_ = true;
-  device_->vs_const_version_++;
-  device_->ps_const_version_++;
-  device_->ff_const_version_++;
-  device_->ff_dirty_ |= D3D9Device::kFFDirtyAll;
+
+  if (applyPixel) {
+    memcpy(device_->texture_stage_states_, texture_stage_states, sizeof(texture_stage_states));
+    memcpy(device_->sampler_states_, sampler_states, sizeof(sampler_states));
+    memcpy(device_->psConstants_, ps_constants, sizeof(ps_constants));
+    device_->current_ps_ = ps;
+    for (int i = 0; i < 16; i++)
+      device_->bound_textures_[i] = textures[i];
+    device_->tex_dirty_ = true;
+    device_->ps_const_version_++;
+  }
+
+  if (applyVertex) {
+    memcpy(device_->transforms_, transforms, sizeof(transforms));
+    device_->viewport_ = viewport;
+    device_->scissor_rect_ = scissor_rect;
+    device_->material_ = material;
+    memcpy(device_->lights_, lights, sizeof(lights));
+    memcpy(device_->light_enabled_, light_enabled, sizeof(light_enabled));
+    if (fvf) device_->SetFVF(fvf);
+    memcpy(device_->vsConstants_, vs_constants, sizeof(vs_constants));
+    device_->current_vs_ = vs;
+    device_->current_vdecl_ = vdecl;
+    for (int i = 0; i < 16; i++) {
+      device_->stream_sources_[i] = stream_sources[i];
+      device_->stream_offsets_[i] = stream_offsets[i];
+      device_->stream_strides_[i] = stream_strides[i];
+    }
+    device_->current_ib_ = ib;
+    device_->vb_dirty_ = true;
+    device_->vp_dirty_ = true;
+    device_->scissor_dirty_ = true;
+    device_->vs_const_version_++;
+    device_->ff_const_version_++;
+    device_->ff_dirty_ |= D3D9Device::kFFDirtyAll;
+  }
+
   return S_OK;
 }
 

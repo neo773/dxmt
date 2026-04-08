@@ -15,7 +15,8 @@ class D3D9VertexBuffer;
 class D3D9IndexBuffer;
 class D3D9StateBlock final : public ComObjectClamp<IDirect3DStateBlock9> {
 public:
-  D3D9StateBlock(D3D9Device *device) : device_(device) {}
+  D3D9StateBlock(D3D9Device *device, D3DSTATEBLOCKTYPE type = D3DSBT_ALL)
+      : device_(device), type_(type) {}
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObj) final {
     if (!ppvObj) return E_POINTER;
@@ -39,6 +40,7 @@ public:
 private:
   friend class D3D9Device;
   D3D9Device *device_;
+  D3DSTATEBLOCKTYPE type_ = D3DSBT_ALL;
 
   // Captured state
   DWORD render_states[256] = {};
