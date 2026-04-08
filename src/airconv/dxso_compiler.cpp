@@ -521,6 +521,31 @@ static void compileVertexShader(
     builder.CreateStore(val, dst_ptr);
   };
 
+  // Flow control block stack for structured control flow
+  struct FlowBlock {
+    enum Kind { kIf, kLoop };
+    Kind kind;
+    BasicBlock *merge_bb;    // target for EndIf/EndLoop
+    BasicBlock *header_bb;   // loop header (for Loop only)
+    Value *counter;          // loop counter alloca (for Loop only)
+  };
+  std::vector<FlowBlock> flow_stack;
+
+  // Helper: build comparison from Ifc/BreakC specificData
+  auto buildComparison = [&](uint32_t cmpType, Value *a, Value *b) -> Value * {
+    auto *ax = builder.CreateExtractElement(a, builder.getInt32(0));
+    auto *bx = builder.CreateExtractElement(b, builder.getInt32(0));
+    switch (cmpType & 0x7) {
+    case 1: return builder.CreateFCmpOGT(ax, bx); // GT
+    case 2: return builder.CreateFCmpOEQ(ax, bx); // EQ
+    case 3: return builder.CreateFCmpOGE(ax, bx); // GE
+    case 4: return builder.CreateFCmpOLT(ax, bx); // LT
+    case 5: return builder.CreateFCmpUNE(ax, bx); // NE
+    case 6: return builder.CreateFCmpOLE(ax, bx); // LE
+    default: return builder.getTrue();
+    }
+  };
+
   // Compile instructions
   while (decoder.decodeInstruction(inst)) {
     switch (inst.instruction.opcode) {
@@ -841,6 +866,248 @@ static void compileVertexShader(
         auto *y = builder.CreateExtractElement(mul, builder.getInt32(1));
         auto *z = builder.CreateExtractElement(mul, builder.getInt32(2));
         auto *dot = builder.CreateFAdd(builder.CreateFAdd(x, y), z);
+        result = builder.CreateInsertElement(result, dot, builder.getInt32(row));
+      }
+      storeDst(inst.dst, result);
+      break;
+    }
+
+    // Flow control
+    case DxsoOpcode::Ifc: {
+      auto *a = loadSrc(inst.src[0]);
+      auto *b = loadSrc(inst.src[1]);
+      auto *cond = buildComparison(inst.instruction.specificData, a, b);
+      auto *then_bb = BasicBlock::Create(context, "if_then", function);
+      auto *merge_bb = BasicBlock::Create(context, "if_merge", function);
+      builder.CreateCondBr(cond, then_bb, merge_bb);
+      flow_stack.push_back({FlowBlock::kIf, merge_bb, nullptr, nullptr});
+      builder.SetInsertPoint(then_bb);
+      break;
+    }
+    case DxsoOpcode::If: {
+      // If with boolean register — treat .x as nonzero
+      auto *src = loadSrc(inst.src[0]);
+      auto *x = builder.CreateExtractElement(src, builder.getInt32(0));
+      auto *cond = builder.CreateFCmpUNE(x, ConstantFP::get(types._float, 0.0));
+      auto *then_bb = BasicBlock::Create(context, "if_then", function);
+      auto *merge_bb = BasicBlock::Create(context, "if_merge", function);
+      builder.CreateCondBr(cond, then_bb, merge_bb);
+      flow_stack.push_back({FlowBlock::kIf, merge_bb, nullptr, nullptr});
+      builder.SetInsertPoint(then_bb);
+      break;
+    }
+    case DxsoOpcode::Else: {
+      if (!flow_stack.empty() && flow_stack.back().kind == FlowBlock::kIf) {
+        auto *else_bb = BasicBlock::Create(context, "if_else", function);
+        auto *merge_bb = flow_stack.back().merge_bb;
+        builder.CreateBr(merge_bb);
+        // Redirect the false branch: the merge_bb currently has no predecessors from
+        // the conditional branch's false path. We need to rewrite the predecessor's
+        // CondBr to point to else_bb instead of merge_bb.
+        // Actually, the CondBr goes to (then_bb, merge_bb). We want (then_bb, else_bb).
+        // Find the block that branches to merge_bb via false edge.
+        for (auto it = pred_begin(merge_bb), e = pred_end(merge_bb); it != e; ++it) {
+          auto *term = (*it)->getTerminator();
+          if (auto *br = dyn_cast<BranchInst>(term)) {
+            if (br->isConditional() && br->getSuccessor(1) == merge_bb) {
+              br->setSuccessor(1, else_bb);
+              break;
+            }
+          }
+        }
+        builder.SetInsertPoint(else_bb);
+      }
+      break;
+    }
+    case DxsoOpcode::EndIf: {
+      if (!flow_stack.empty() && flow_stack.back().kind == FlowBlock::kIf) {
+        auto *merge_bb = flow_stack.back().merge_bb;
+        builder.CreateBr(merge_bb);
+        builder.SetInsertPoint(merge_bb);
+        flow_stack.pop_back();
+      }
+      break;
+    }
+    case DxsoOpcode::Loop: {
+      // Loop aL, iN — iN.x=count, iN.y=initial, iN.z=step
+      // For now, load integer constants from the constant buffer
+      // (integer constants are not yet fully supported — use iteration count only)
+      auto *header_bb = BasicBlock::Create(context, "loop_header", function);
+      auto *body_bb = BasicBlock::Create(context, "loop_body", function);
+      auto *exit_bb = BasicBlock::Create(context, "loop_exit", function);
+
+      // Allocate loop counter
+      auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "loop_ctr");
+      // Load iteration count from integer constant register (src[0])
+      // For now, default to a fixed iteration count since integer constants aren't piped through
+      uint32_t iterCount = 255; // safe fallback
+      builder.CreateStore(builder.getInt32(iterCount), counter);
+
+      builder.CreateBr(header_bb);
+      builder.SetInsertPoint(header_bb);
+      auto *ctr = builder.CreateLoad(builder.getInt32Ty(), counter);
+      auto *done = builder.CreateICmpEQ(ctr, builder.getInt32(0));
+      builder.CreateCondBr(done, exit_bb, body_bb);
+      builder.SetInsertPoint(body_bb);
+      flow_stack.push_back({FlowBlock::kLoop, exit_bb, header_bb, counter});
+      break;
+    }
+    case DxsoOpcode::EndLoop: {
+      if (!flow_stack.empty() && flow_stack.back().kind == FlowBlock::kLoop) {
+        auto &fb = flow_stack.back();
+        auto *ctr = builder.CreateLoad(builder.getInt32Ty(), fb.counter);
+        builder.CreateStore(builder.CreateSub(ctr, builder.getInt32(1)), fb.counter);
+        builder.CreateBr(fb.header_bb);
+        builder.SetInsertPoint(fb.merge_bb);
+        flow_stack.pop_back();
+      }
+      break;
+    }
+    case DxsoOpcode::Rep: {
+      auto *header_bb = BasicBlock::Create(context, "rep_header", function);
+      auto *body_bb = BasicBlock::Create(context, "rep_body", function);
+      auto *exit_bb = BasicBlock::Create(context, "rep_exit", function);
+      auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "rep_ctr");
+      uint32_t iterCount = 255;
+      builder.CreateStore(builder.getInt32(iterCount), counter);
+      builder.CreateBr(header_bb);
+      builder.SetInsertPoint(header_bb);
+      auto *ctr = builder.CreateLoad(builder.getInt32Ty(), counter);
+      auto *done = builder.CreateICmpEQ(ctr, builder.getInt32(0));
+      builder.CreateCondBr(done, exit_bb, body_bb);
+      builder.SetInsertPoint(body_bb);
+      flow_stack.push_back({FlowBlock::kLoop, exit_bb, header_bb, counter});
+      break;
+    }
+    case DxsoOpcode::EndRep: {
+      if (!flow_stack.empty() && flow_stack.back().kind == FlowBlock::kLoop) {
+        auto &fb = flow_stack.back();
+        auto *ctr = builder.CreateLoad(builder.getInt32Ty(), fb.counter);
+        builder.CreateStore(builder.CreateSub(ctr, builder.getInt32(1)), fb.counter);
+        builder.CreateBr(fb.header_bb);
+        builder.SetInsertPoint(fb.merge_bb);
+        flow_stack.pop_back();
+      }
+      break;
+    }
+    case DxsoOpcode::Break: {
+      // Jump to innermost loop exit
+      for (auto it = flow_stack.rbegin(); it != flow_stack.rend(); ++it) {
+        if (it->kind == FlowBlock::kLoop) {
+          builder.CreateBr(it->merge_bb);
+          auto *unreachable_bb = BasicBlock::Create(context, "after_break", function);
+          builder.SetInsertPoint(unreachable_bb);
+          break;
+        }
+      }
+      break;
+    }
+    case DxsoOpcode::BreakC: {
+      auto *a = loadSrc(inst.src[0]);
+      auto *b = loadSrc(inst.src[1]);
+      auto *cond = buildComparison(inst.instruction.specificData, a, b);
+      auto *break_bb = BasicBlock::Create(context, "breakc_break", function);
+      auto *continue_bb = BasicBlock::Create(context, "breakc_continue", function);
+      builder.CreateCondBr(cond, break_bb, continue_bb);
+      builder.SetInsertPoint(break_bb);
+      for (auto it = flow_stack.rbegin(); it != flow_stack.rend(); ++it) {
+        if (it->kind == FlowBlock::kLoop) {
+          builder.CreateBr(it->merge_bb);
+          break;
+        }
+      }
+      builder.SetInsertPoint(continue_bb);
+      break;
+    }
+
+    // Missing arithmetic/utility opcodes
+    case DxsoOpcode::Dp2Add: {
+      auto *a = loadSrc(inst.src[0]);
+      auto *b = loadSrc(inst.src[1]);
+      auto *c = loadSrc(inst.src[2]);
+      auto *ax = builder.CreateExtractElement(a, builder.getInt32(0));
+      auto *ay = builder.CreateExtractElement(a, builder.getInt32(1));
+      auto *bx = builder.CreateExtractElement(b, builder.getInt32(0));
+      auto *by = builder.CreateExtractElement(b, builder.getInt32(1));
+      auto *cw = builder.CreateExtractElement(c, builder.getInt32(0));
+      auto *dp2 = builder.CreateFAdd(builder.CreateFMul(ax, bx), builder.CreateFMul(ay, by));
+      auto *result_scalar = builder.CreateFAdd(dp2, cw);
+      auto *result = builder.CreateVectorSplat(4, result_scalar);
+      storeDst(inst.dst, result);
+      break;
+    }
+
+    case DxsoOpcode::Sgn: {
+      auto *src = loadSrc(inst.src[0]);
+      auto *zero = ConstantVector::getSplat(ElementCount::getFixed(4), ConstantFP::get(types._float, 0.0));
+      auto *one = ConstantVector::getSplat(ElementCount::getFixed(4), ConstantFP::get(types._float, 1.0));
+      auto *neg_one = ConstantVector::getSplat(ElementCount::getFixed(4), ConstantFP::get(types._float, -1.0));
+      auto *gt = builder.CreateFCmpOGT(src, zero);
+      auto *lt = builder.CreateFCmpOLT(src, zero);
+      auto *result = builder.CreateSelect(gt, one, builder.CreateSelect(lt, neg_one, zero));
+      storeDst(inst.dst, result);
+      break;
+    }
+
+    case DxsoOpcode::Lit: {
+      auto *src = loadSrc(inst.src[0]);
+      auto *sx = builder.CreateExtractElement(src, builder.getInt32(0)); // diffuse
+      auto *sy = builder.CreateExtractElement(src, builder.getInt32(1)); // specular
+      auto *sw = builder.CreateExtractElement(src, builder.getInt32(3)); // power
+      auto *zero = ConstantFP::get(types._float, 0.0);
+      auto *one = ConstantFP::get(types._float, 1.0);
+      // result = {1.0, max(0, src.x), (src.x > 0) ? pow(max(0,src.y), clamp(src.w,-128,128)) : 0, 1.0}
+      auto *diff = air.CreateFPBinOp(air.fmax, sx, zero);
+      auto *spec_base = air.CreateFPBinOp(air.fmax, sy, zero);
+      auto *power_clamped = air.CreateFPBinOp(air.fmax,
+        air.CreateFPBinOp(air.fmin, sw, ConstantFP::get(types._float, 128.0)),
+        ConstantFP::get(types._float, -128.0));
+      Value *spec = builder.CreateBinaryIntrinsic(Intrinsic::pow, spec_base, power_clamped);
+      auto *x_pos = builder.CreateFCmpOGT(sx, zero);
+      spec = builder.CreateSelect(x_pos, spec, zero);
+      Value *result = UndefValue::get(float4Ty);
+      result = builder.CreateInsertElement(result, one, builder.getInt32(0));
+      result = builder.CreateInsertElement(result, diff, builder.getInt32(1));
+      result = builder.CreateInsertElement(result, spec, builder.getInt32(2));
+      result = builder.CreateInsertElement(result, one, builder.getInt32(3));
+      storeDst(inst.dst, result);
+      break;
+    }
+
+    case DxsoOpcode::Dst: {
+      auto *s0 = loadSrc(inst.src[0]);
+      auto *s1 = loadSrc(inst.src[1]);
+      auto *one = ConstantFP::get(types._float, 1.0);
+      auto *s0y = builder.CreateExtractElement(s0, builder.getInt32(1));
+      auto *s1y = builder.CreateExtractElement(s1, builder.getInt32(1));
+      auto *s0z = builder.CreateExtractElement(s0, builder.getInt32(2));
+      auto *s1w = builder.CreateExtractElement(s1, builder.getInt32(3));
+      Value *result = UndefValue::get(float4Ty);
+      result = builder.CreateInsertElement(result, one, builder.getInt32(0));
+      result = builder.CreateInsertElement(result, builder.CreateFMul(s0y, s1y), builder.getInt32(1));
+      result = builder.CreateInsertElement(result, s0z, builder.getInt32(2));
+      result = builder.CreateInsertElement(result, s1w, builder.getInt32(3));
+      storeDst(inst.dst, result);
+      break;
+    }
+
+    case DxsoOpcode::M3x4: {
+      auto *src = loadSrc(inst.src[0]);
+      uint32_t baseReg = inst.src[1].id.num;
+      Value *result = UndefValue::get(float4Ty);
+      for (uint32_t row = 0; row < 4; row++) {
+        DxsoRegister matReg = inst.src[1];
+        matReg.id.num = baseReg + row;
+        auto *matRow = loadSrc(matReg);
+        auto *ax = builder.CreateExtractElement(src, builder.getInt32(0));
+        auto *ay = builder.CreateExtractElement(src, builder.getInt32(1));
+        auto *az = builder.CreateExtractElement(src, builder.getInt32(2));
+        auto *mx = builder.CreateExtractElement(matRow, builder.getInt32(0));
+        auto *my = builder.CreateExtractElement(matRow, builder.getInt32(1));
+        auto *mz = builder.CreateExtractElement(matRow, builder.getInt32(2));
+        auto *dot = builder.CreateFAdd(builder.CreateFAdd(
+          builder.CreateFMul(ax, mx), builder.CreateFMul(ay, my)),
+          builder.CreateFMul(az, mz));
         result = builder.CreateInsertElement(result, dot, builder.getInt32(row));
       }
       storeDst(inst.dst, result);
@@ -1312,6 +1579,30 @@ static void compilePixelShader(
     builder.CreateStore(val, dst_ptr);
   };
 
+  // Flow control block stack for PS
+  struct PSFlowBlock {
+    enum Kind { kIf, kLoop };
+    Kind kind;
+    BasicBlock *merge_bb;
+    BasicBlock *header_bb;
+    Value *counter;
+  };
+  std::vector<PSFlowBlock> ps_flow_stack;
+
+  auto psBuildComparison = [&](uint32_t cmpType, Value *a, Value *b) -> Value * {
+    auto *ax = builder.CreateExtractElement(a, builder.getInt32(0));
+    auto *bx = builder.CreateExtractElement(b, builder.getInt32(0));
+    switch (cmpType & 0x7) {
+    case 1: return builder.CreateFCmpOGT(ax, bx);
+    case 2: return builder.CreateFCmpOEQ(ax, bx);
+    case 3: return builder.CreateFCmpOGE(ax, bx);
+    case 4: return builder.CreateFCmpOLT(ax, bx);
+    case 5: return builder.CreateFCmpUNE(ax, bx);
+    case 6: return builder.CreateFCmpOLE(ax, bx);
+    default: return builder.getTrue();
+    }
+  };
+
   // Decode and compile instructions
   DxsoDecoder psDecoder(shader->fullTokens.data());
   DxsoInstructionContext psInst;
@@ -1595,6 +1886,234 @@ static void compilePixelShader(
       builder.CreateCall(discardFn);
       builder.CreateBr(continue_bb);
       builder.SetInsertPoint(continue_bb);
+      break;
+    }
+
+    // Flow control
+    case DxsoOpcode::Ifc: {
+      auto *a = loadSrc(psInst.src[0]);
+      auto *b = loadSrc(psInst.src[1]);
+      auto *cond = psBuildComparison(psInst.instruction.specificData, a, b);
+      auto *then_bb = BasicBlock::Create(context, "if_then", function);
+      auto *merge_bb = BasicBlock::Create(context, "if_merge", function);
+      builder.CreateCondBr(cond, then_bb, merge_bb);
+      ps_flow_stack.push_back({PSFlowBlock::kIf, merge_bb, nullptr, nullptr});
+      builder.SetInsertPoint(then_bb);
+      break;
+    }
+    case DxsoOpcode::If: {
+      auto *src = loadSrc(psInst.src[0]);
+      auto *x = builder.CreateExtractElement(src, builder.getInt32(0));
+      auto *cond = builder.CreateFCmpUNE(x, ConstantFP::get(types._float, 0.0));
+      auto *then_bb = BasicBlock::Create(context, "if_then", function);
+      auto *merge_bb = BasicBlock::Create(context, "if_merge", function);
+      builder.CreateCondBr(cond, then_bb, merge_bb);
+      ps_flow_stack.push_back({PSFlowBlock::kIf, merge_bb, nullptr, nullptr});
+      builder.SetInsertPoint(then_bb);
+      break;
+    }
+    case DxsoOpcode::Else: {
+      if (!ps_flow_stack.empty() && ps_flow_stack.back().kind == PSFlowBlock::kIf) {
+        auto *else_bb = BasicBlock::Create(context, "if_else", function);
+        auto *merge_bb = ps_flow_stack.back().merge_bb;
+        builder.CreateBr(merge_bb);
+        for (auto it = pred_begin(merge_bb), e = pred_end(merge_bb); it != e; ++it) {
+          auto *term = (*it)->getTerminator();
+          if (auto *br = dyn_cast<BranchInst>(term)) {
+            if (br->isConditional() && br->getSuccessor(1) == merge_bb) {
+              br->setSuccessor(1, else_bb);
+              break;
+            }
+          }
+        }
+        builder.SetInsertPoint(else_bb);
+      }
+      break;
+    }
+    case DxsoOpcode::EndIf: {
+      if (!ps_flow_stack.empty() && ps_flow_stack.back().kind == PSFlowBlock::kIf) {
+        builder.CreateBr(ps_flow_stack.back().merge_bb);
+        builder.SetInsertPoint(ps_flow_stack.back().merge_bb);
+        ps_flow_stack.pop_back();
+      }
+      break;
+    }
+    case DxsoOpcode::Loop: {
+      auto *header_bb = BasicBlock::Create(context, "loop_header", function);
+      auto *body_bb = BasicBlock::Create(context, "loop_body", function);
+      auto *exit_bb = BasicBlock::Create(context, "loop_exit", function);
+      auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "loop_ctr");
+      builder.CreateStore(builder.getInt32(255), counter);
+      builder.CreateBr(header_bb);
+      builder.SetInsertPoint(header_bb);
+      auto *ctr = builder.CreateLoad(builder.getInt32Ty(), counter);
+      builder.CreateCondBr(builder.CreateICmpEQ(ctr, builder.getInt32(0)), exit_bb, body_bb);
+      builder.SetInsertPoint(body_bb);
+      ps_flow_stack.push_back({PSFlowBlock::kLoop, exit_bb, header_bb, counter});
+      break;
+    }
+    case DxsoOpcode::EndLoop: {
+      if (!ps_flow_stack.empty() && ps_flow_stack.back().kind == PSFlowBlock::kLoop) {
+        auto &fb = ps_flow_stack.back();
+        auto *ctr = builder.CreateLoad(builder.getInt32Ty(), fb.counter);
+        builder.CreateStore(builder.CreateSub(ctr, builder.getInt32(1)), fb.counter);
+        builder.CreateBr(fb.header_bb);
+        builder.SetInsertPoint(fb.merge_bb);
+        ps_flow_stack.pop_back();
+      }
+      break;
+    }
+    case DxsoOpcode::Rep: {
+      auto *header_bb = BasicBlock::Create(context, "rep_header", function);
+      auto *body_bb = BasicBlock::Create(context, "rep_body", function);
+      auto *exit_bb = BasicBlock::Create(context, "rep_exit", function);
+      auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "rep_ctr");
+      builder.CreateStore(builder.getInt32(255), counter);
+      builder.CreateBr(header_bb);
+      builder.SetInsertPoint(header_bb);
+      auto *ctr = builder.CreateLoad(builder.getInt32Ty(), counter);
+      builder.CreateCondBr(builder.CreateICmpEQ(ctr, builder.getInt32(0)), exit_bb, body_bb);
+      builder.SetInsertPoint(body_bb);
+      ps_flow_stack.push_back({PSFlowBlock::kLoop, exit_bb, header_bb, counter});
+      break;
+    }
+    case DxsoOpcode::EndRep: {
+      if (!ps_flow_stack.empty() && ps_flow_stack.back().kind == PSFlowBlock::kLoop) {
+        auto &fb = ps_flow_stack.back();
+        auto *ctr = builder.CreateLoad(builder.getInt32Ty(), fb.counter);
+        builder.CreateStore(builder.CreateSub(ctr, builder.getInt32(1)), fb.counter);
+        builder.CreateBr(fb.header_bb);
+        builder.SetInsertPoint(fb.merge_bb);
+        ps_flow_stack.pop_back();
+      }
+      break;
+    }
+    case DxsoOpcode::Break: {
+      for (auto it = ps_flow_stack.rbegin(); it != ps_flow_stack.rend(); ++it) {
+        if (it->kind == PSFlowBlock::kLoop) {
+          builder.CreateBr(it->merge_bb);
+          builder.SetInsertPoint(BasicBlock::Create(context, "after_break", function));
+          break;
+        }
+      }
+      break;
+    }
+    case DxsoOpcode::BreakC: {
+      auto *a = loadSrc(psInst.src[0]);
+      auto *b = loadSrc(psInst.src[1]);
+      auto *cond = psBuildComparison(psInst.instruction.specificData, a, b);
+      auto *break_bb = BasicBlock::Create(context, "breakc_break", function);
+      auto *continue_bb = BasicBlock::Create(context, "breakc_continue", function);
+      builder.CreateCondBr(cond, break_bb, continue_bb);
+      builder.SetInsertPoint(break_bb);
+      for (auto it = ps_flow_stack.rbegin(); it != ps_flow_stack.rend(); ++it) {
+        if (it->kind == PSFlowBlock::kLoop) {
+          builder.CreateBr(it->merge_bb);
+          break;
+        }
+      }
+      builder.SetInsertPoint(continue_bb);
+      break;
+    }
+
+    // Derivatives
+    case DxsoOpcode::DsX: {
+      auto *src = loadSrc(psInst.src[0]);
+      Value *result = UndefValue::get(float4Ty);
+      for (uint32_t i = 0; i < 4; i++) {
+        auto *comp = builder.CreateExtractElement(src, builder.getInt32(i));
+        result = builder.CreateInsertElement(result, air.CreateDerivative(comp, false), builder.getInt32(i));
+      }
+      storeDst(psInst.dst, result);
+      break;
+    }
+    case DxsoOpcode::DsY: {
+      auto *src = loadSrc(psInst.src[0]);
+      Value *result = UndefValue::get(float4Ty);
+      for (uint32_t i = 0; i < 4; i++) {
+        auto *comp = builder.CreateExtractElement(src, builder.getInt32(i));
+        result = builder.CreateInsertElement(result, air.CreateDerivative(comp, true), builder.getInt32(i));
+      }
+      storeDst(psInst.dst, result);
+      break;
+    }
+
+    // TexLdl — sample with explicit LOD from src0.w
+    case DxsoOpcode::TexLdl: {
+      uint32_t sampReg = psInst.src[1].id.num;
+      auto it = samplerBindings.find(sampReg);
+      if (it != samplerBindings.end()) {
+        auto &binding = it->second;
+        auto *coords = loadSrc(psInst.src[0]);
+        auto *u = builder.CreateExtractElement(coords, builder.getInt32(0));
+        auto *v = builder.CreateExtractElement(coords, builder.getInt32(1));
+        auto *lod = builder.CreateExtractElement(coords, builder.getInt32(3));
+        auto *float2Ty = FixedVectorType::get(types._float, 2);
+        Value *coord2d = UndefValue::get(float2Ty);
+        coord2d = builder.CreateInsertElement(coord2d, u, builder.getInt32(0));
+        coord2d = builder.CreateInsertElement(coord2d, v, builder.getInt32(1));
+        auto *texHandle = builder.CreateLoad(
+          ps_argbuf_type->getElementType(binding.texStructIdx),
+          builder.CreateStructGEP(ps_argbuf_type, ps_argbuf_ptr, binding.texStructIdx));
+        auto *sampHandle = builder.CreateLoad(
+          ps_argbuf_type->getElementType(binding.sampStructIdx),
+          builder.CreateStructGEP(ps_argbuf_type, ps_argbuf_ptr, binding.sampStructIdx));
+        int32_t offsets[3] = {0, 0, 0};
+        auto [sampled, residency] = air.CreateSample(
+          binding.texDesc, texHandle, sampHandle, coord2d, nullptr, offsets,
+          llvm::air::sample_level{lod});
+        storeDst(psInst.dst, sampled);
+      }
+      break;
+    }
+
+    // TexLdd — sample with explicit gradients
+    case DxsoOpcode::TexLdd: {
+      uint32_t sampReg = psInst.src[1].id.num;
+      auto it = samplerBindings.find(sampReg);
+      if (it != samplerBindings.end()) {
+        auto &binding = it->second;
+        auto *coords = loadSrc(psInst.src[0]);
+        auto *dsx = loadSrc(psInst.src[2]);
+        auto *dsy = loadSrc(psInst.src[3]);
+        auto *u = builder.CreateExtractElement(coords, builder.getInt32(0));
+        auto *v = builder.CreateExtractElement(coords, builder.getInt32(1));
+        auto *float2Ty = FixedVectorType::get(types._float, 2);
+        Value *coord2d = UndefValue::get(float2Ty);
+        coord2d = builder.CreateInsertElement(coord2d, u, builder.getInt32(0));
+        coord2d = builder.CreateInsertElement(coord2d, v, builder.getInt32(1));
+        Value *grad_x = UndefValue::get(float2Ty);
+        grad_x = builder.CreateInsertElement(grad_x, builder.CreateExtractElement(dsx, builder.getInt32(0)), builder.getInt32(0));
+        grad_x = builder.CreateInsertElement(grad_x, builder.CreateExtractElement(dsx, builder.getInt32(1)), builder.getInt32(1));
+        Value *grad_y = UndefValue::get(float2Ty);
+        grad_y = builder.CreateInsertElement(grad_y, builder.CreateExtractElement(dsy, builder.getInt32(0)), builder.getInt32(0));
+        grad_y = builder.CreateInsertElement(grad_y, builder.CreateExtractElement(dsy, builder.getInt32(1)), builder.getInt32(1));
+        auto *texHandle = builder.CreateLoad(
+          ps_argbuf_type->getElementType(binding.texStructIdx),
+          builder.CreateStructGEP(ps_argbuf_type, ps_argbuf_ptr, binding.texStructIdx));
+        auto *sampHandle = builder.CreateLoad(
+          ps_argbuf_type->getElementType(binding.sampStructIdx),
+          builder.CreateStructGEP(ps_argbuf_type, ps_argbuf_ptr, binding.sampStructIdx));
+        int32_t offsets[3] = {0, 0, 0};
+        auto [sampled, residency] = air.CreateSampleGrad(
+          binding.texDesc, texHandle, sampHandle, coord2d, nullptr, grad_x, grad_y, offsets);
+        storeDst(psInst.dst, sampled);
+      }
+      break;
+    }
+
+    // Missing arithmetic opcodes (PS)
+    case DxsoOpcode::Dp2Add: {
+      auto *a = loadSrc(psInst.src[0]);
+      auto *b = loadSrc(psInst.src[1]);
+      auto *c = loadSrc(psInst.src[2]);
+      auto *dp2 = builder.CreateFAdd(
+        builder.CreateFMul(builder.CreateExtractElement(a, builder.getInt32(0)),
+                           builder.CreateExtractElement(b, builder.getInt32(0))),
+        builder.CreateFMul(builder.CreateExtractElement(a, builder.getInt32(1)),
+                           builder.CreateExtractElement(b, builder.getInt32(1))));
+      auto *result_scalar = builder.CreateFAdd(dp2, builder.CreateExtractElement(c, builder.getInt32(0)));
+      storeDst(psInst.dst, builder.CreateVectorSplat(4, result_scalar));
       break;
     }
 

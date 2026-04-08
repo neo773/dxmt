@@ -58,6 +58,7 @@ struct DxsoRegister {
 struct DxsoInstruction {
   DxsoOpcode opcode;
   uint32_t tokenLength;
+  uint32_t specificData; // bits 16-23 of instruction token (comparison type for Ifc/BreakC)
 };
 
 constexpr uint32_t DxsoMaxSrcRegs = 4;
@@ -137,6 +138,7 @@ inline bool DxsoDecoder::decodeInstruction(DxsoInstructionContext &ctx) {
 
   ctx.instruction.opcode = static_cast<DxsoOpcode>(token & 0x0000ffff);
   ctx.instruction.tokenLength = decodeInstructionLength(token, ctx.instruction.opcode);
+  ctx.instruction.specificData = (token >> 16) & 0xff;
 
   if (ctx.instruction.opcode == DxsoOpcode::End)
     return false;
@@ -176,6 +178,28 @@ inline bool DxsoDecoder::decodeInstruction(DxsoInstructionContext &ctx) {
     ctx.def.uint32[0] = iter_.read();
     return true;
   }
+  // Flow control: source-only opcodes (no dst register)
+  case DxsoOpcode::Ifc:
+  case DxsoOpcode::BreakC: {
+    // Two source registers, comparison type in specificData
+    for (uint32_t i = 0; i < remaining && i < DxsoMaxSrcRegs; i++)
+      decodeRegister(ctx.src[i], iter_.read(), false);
+    return true;
+  }
+  case DxsoOpcode::If:
+  case DxsoOpcode::Rep: {
+    // One source register
+    if (remaining > 0)
+      decodeRegister(ctx.src[0], iter_.read(), false);
+    return true;
+  }
+  case DxsoOpcode::Else:
+  case DxsoOpcode::EndIf:
+  case DxsoOpcode::EndLoop:
+  case DxsoOpcode::EndRep:
+  case DxsoOpcode::Break:
+    // No operands
+    return true;
   default: {
     // Generic: first token is dst, rest are src
     uint32_t srcIdx = 0;
