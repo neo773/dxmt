@@ -127,11 +127,10 @@ D3D9Device::D3D9Device(IDirect3D9 *pD3D9, HWND hFocusWindow, D3DPRESENT_PARAMETE
   // (snapshot ring removed — emit-on-draw copies constants directly)
 
   // Initialize current render target to backbuffer
-  current_rt_surface_ = backbuffer_surface_;
-  current_rt_iface_ = Com<IDirect3DSurface9>(backbuffer_surface_.ptr());
-  current_rt_ = backbuffer_;
-  current_rt_view_ = backbuffer_view_;
-  current_rt_format_ = WMTPixelFormatBGRA8Unorm;
+  current_rt_iface_[0] = Com<IDirect3DSurface9>(backbuffer_surface_.ptr());
+  current_rt_[0] = backbuffer_;
+  current_rt_view_[0] = backbuffer_view_;
+  current_rt_format_[0] = WMTPixelFormatBGRA8Unorm;
 
   // Auto-create depth stencil if requested
   if (present_params_.EnableAutoDepthStencil) {
@@ -489,11 +488,10 @@ HRESULT STDMETHODCALLTYPE D3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentation
   CreateBackbuffer(present_params_.BackBufferWidth, present_params_.BackBufferHeight);
 
   // Reset current RT to new backbuffer
-  current_rt_surface_ = backbuffer_surface_;
-  current_rt_iface_ = Com<IDirect3DSurface9>(backbuffer_surface_.ptr());
-  current_rt_ = backbuffer_;
-  current_rt_view_ = backbuffer_view_;
-  current_rt_format_ = WMTPixelFormatBGRA8Unorm;
+  current_rt_iface_[0] = Com<IDirect3DSurface9>(backbuffer_surface_.ptr());
+  current_rt_[0] = backbuffer_;
+  current_rt_view_[0] = backbuffer_view_;
+  current_rt_format_[0] = WMTPixelFormatBGRA8Unorm;
 
   Logger::info(str::format("D3D9Device: Reset backbuffer ",
       present_params_.BackBufferWidth, "x", present_params_.BackBufferHeight,
@@ -522,17 +520,25 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetBackBuffer(
 
 HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9 *pRenderTarget) {
   InvalidateCurrentPass();
-  if (RenderTargetIndex != 0) {
-    Logger::warn(str::format("D3D9: SetRenderTarget index ", RenderTargetIndex, " not supported"));
+  if (RenderTargetIndex >= kMaxRenderTargets)
     return D3DERR_INVALIDCALL;
-  }
+  if (RenderTargetIndex == 0 && !pRenderTarget)
+    return D3DERR_INVALIDCALL; // RT0 cannot be null
+
   if (!pRenderTarget) {
-    // RT0 cannot be set to null
-    return D3DERR_INVALIDCALL;
+    // Unbind secondary render target
+    current_rt_[RenderTargetIndex] = nullptr;
+    current_rt_view_[RenderTargetIndex] = 0;
+    current_rt_format_[RenderTargetIndex] = WMTPixelFormatInvalid;
+    current_rt_iface_[RenderTargetIndex] = nullptr;
+    // Recount active RTs
+    current_rt_count_ = 1;
+    for (uint32_t i = 1; i < kMaxRenderTargets; i++)
+      if (current_rt_[i]) current_rt_count_ = i + 1;
+    pso_dirty_ = true;
+    return S_OK;
   }
 
-  // Determine if this is a D3D9Surface or D3D9TextureSurface
-  // Try GetContainer to detect texture surface
   IDirect3DTexture9 *containerTex = nullptr;
   bool isTexSurface = SUCCEEDED(pRenderTarget->GetContainer(__uuidof(IDirect3DTexture9), (void **)&containerTex));
   if (containerTex) containerTex->Release();
@@ -546,39 +552,48 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, I
     rtTex = texSurf->texture();
     rtView = texSurf->viewKey();
     rtFormat = texSurf->mtlFormat();
-    current_rt_surface_ = nullptr; // Not a D3D9Surface
   } else {
     auto *surf = static_cast<D3D9Surface *>(pRenderTarget);
     rtTex = surf->texture();
     rtView = surf->viewKey();
     rtFormat = surf->mtlFormat();
-    current_rt_surface_ = surf;
   }
 
-  current_rt_ = rtTex;
-  current_rt_view_ = rtView;
-  current_rt_format_ = rtFormat;
-  current_rt_iface_ = Com<IDirect3DSurface9>(pRenderTarget);
+  current_rt_[RenderTargetIndex] = rtTex;
+  current_rt_view_[RenderTargetIndex] = rtView;
+  current_rt_format_[RenderTargetIndex] = rtFormat;
+  current_rt_iface_[RenderTargetIndex] = Com<IDirect3DSurface9>(pRenderTarget);
 
-  // Update viewport to match new render target size
-  viewport_.X = 0;
-  viewport_.Y = 0;
-  viewport_.Width = current_rt_->width();
-  viewport_.Height = current_rt_->height();
-  viewport_.MinZ = 0.0f;
-  viewport_.MaxZ = 1.0f;
+  // Recount active RTs
+  current_rt_count_ = 1;
+  for (uint32_t i = 1; i < kMaxRenderTargets; i++)
+    if (current_rt_[i]) current_rt_count_ = i + 1;
+  pso_dirty_ = true;
+
+  // Only update viewport for RT0
+  if (RenderTargetIndex == 0) {
+    viewport_.X = 0;
+    viewport_.Y = 0;
+    viewport_.Width = current_rt_[0]->width();
+    viewport_.Height = current_rt_[0]->height();
+    viewport_.MinZ = 0.0f;
+    viewport_.MaxZ = 1.0f;
+  }
 
   return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9 **ppRenderTarget) {
-  if (RenderTargetIndex != 0 || !ppRenderTarget)
+  if (RenderTargetIndex >= kMaxRenderTargets || !ppRenderTarget)
     return D3DERR_INVALIDCALL;
-  if (current_rt_iface_) {
-    current_rt_iface_->AddRef();
-    *ppRenderTarget = current_rt_iface_.ptr();
-  } else {
+  if (current_rt_iface_[RenderTargetIndex]) {
+    current_rt_iface_[RenderTargetIndex]->AddRef();
+    *ppRenderTarget = current_rt_iface_[RenderTargetIndex].ptr();
+  } else if (RenderTargetIndex == 0) {
     *ppRenderTarget = ref(backbuffer_surface_.ptr());
+  } else {
+    *ppRenderTarget = nullptr;
+    return D3DERR_NOTFOUND;
   }
   return S_OK;
 }
@@ -617,9 +632,9 @@ HRESULT STDMETHODCALLTYPE D3D9Device::Clear(
   if (clearColor) {
     chunk->emitcc([
       r, g, b, a,
-      rt = current_rt_,
-      rt_alloc = Rc<TextureAllocation>(current_rt_->current()),
-      rt_view = current_rt_view_
+      rt = current_rt_[0],
+      rt_alloc = Rc<TextureAllocation>(current_rt_[0]->current()),
+      rt_view = current_rt_view_[0]
     ](ArgumentEncodingContext &ctx) mutable {
       ctx.clearColor(std::move(rt), rt_alloc.ptr(), rt_view, 1, {r, g, b, a});
     });
@@ -1809,20 +1824,22 @@ D3D9CompiledPipeline *D3D9Device::CreatePSO() {
 
   pipeline_info.vertex_function = vs_handle;
   pipeline_info.fragment_function = ps_handle;
-  // Use sRGB format variant when sRGB write is enabled and RT is BGRA8
-  if (srgbWrite && current_rt_format_ == WMTPixelFormatBGRA8Unorm)
-    pipeline_info.colors[0].pixel_format = WMTPixelFormatBGRA8Unorm_sRGB;
-  else
-    pipeline_info.colors[0].pixel_format = current_rt_format_;
 
   // Color write mask: D3D9 (R=1,G=2,B=4,A=8) → Metal (R=8,G=4,B=2,A=1)
-  {
-    uint8_t mtlMask = 0;
-    if (colorWriteMask & 0x1) mtlMask |= WMTColorWriteMaskRed;
-    if (colorWriteMask & 0x2) mtlMask |= WMTColorWriteMaskGreen;
-    if (colorWriteMask & 0x4) mtlMask |= WMTColorWriteMaskBlue;
-    if (colorWriteMask & 0x8) mtlMask |= WMTColorWriteMaskAlpha;
-    pipeline_info.colors[0].write_mask = (WMTColorWriteMask)mtlMask;
+  uint8_t mtlMask = 0;
+  if (colorWriteMask & 0x1) mtlMask |= WMTColorWriteMaskRed;
+  if (colorWriteMask & 0x2) mtlMask |= WMTColorWriteMaskGreen;
+  if (colorWriteMask & 0x4) mtlMask |= WMTColorWriteMaskBlue;
+  if (colorWriteMask & 0x8) mtlMask |= WMTColorWriteMaskAlpha;
+
+  // Set up color attachments for all active render targets
+  for (uint32_t i = 0; i < current_rt_count_; i++) {
+    if (!current_rt_[i]) continue;
+    WMTPixelFormat fmt = current_rt_format_[i];
+    if (i == 0 && srgbWrite && fmt == WMTPixelFormatBGRA8Unorm)
+      fmt = WMTPixelFormatBGRA8Unorm_sRGB;
+    pipeline_info.colors[i].pixel_format = fmt;
+    pipeline_info.colors[i].write_mask = (WMTColorWriteMask)mtlMask;
   }
 
   pipeline_info.rasterization_enabled = true;
@@ -1831,15 +1848,18 @@ D3D9CompiledPipeline *D3D9Device::CreatePSO() {
   pipeline_info.immutable_vertex_buffers = (1 << 29) | (1 << 30);
   pipeline_info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
 
-  // Blend state
+  // Blend state (applies to all active RTs)
   if (blendEnable) {
-    pipeline_info.colors[0].blending_enabled = true;
-    pipeline_info.colors[0].src_rgb_blend_factor = ConvertBlendFactor(srcBlend);
-    pipeline_info.colors[0].dst_rgb_blend_factor = ConvertBlendFactor(destBlend);
-    pipeline_info.colors[0].rgb_blend_operation = ConvertBlendOp(render_states_[D3DRS_BLENDOP]);
-    pipeline_info.colors[0].src_alpha_blend_factor = ConvertBlendFactor(render_states_[D3DRS_SRCBLENDALPHA]);
-    pipeline_info.colors[0].dst_alpha_blend_factor = ConvertBlendFactor(render_states_[D3DRS_DESTBLENDALPHA]);
-    pipeline_info.colors[0].alpha_blend_operation = ConvertBlendOp(render_states_[D3DRS_BLENDOPALPHA]);
+    for (uint32_t i = 0; i < current_rt_count_; i++) {
+      if (!current_rt_[i]) continue;
+      pipeline_info.colors[i].blending_enabled = true;
+      pipeline_info.colors[i].src_rgb_blend_factor = ConvertBlendFactor(srcBlend);
+      pipeline_info.colors[i].dst_rgb_blend_factor = ConvertBlendFactor(destBlend);
+      pipeline_info.colors[i].rgb_blend_operation = ConvertBlendOp(render_states_[D3DRS_BLENDOP]);
+      pipeline_info.colors[i].src_alpha_blend_factor = ConvertBlendFactor(render_states_[D3DRS_SRCBLENDALPHA]);
+      pipeline_info.colors[i].dst_alpha_blend_factor = ConvertBlendFactor(render_states_[D3DRS_DESTBLENDALPHA]);
+      pipeline_info.colors[i].alpha_blend_operation = ConvertBlendOp(render_states_[D3DRS_BLENDOPALPHA]);
+    }
   }
 
   // Depth format
@@ -1980,7 +2000,7 @@ static CommandQueue::TransientAllocation GenerateFanIndices(CommandQueue &queue,
 // ============================================================
 
 bool D3D9Device::EnsureRenderEncoder() {
-  Texture *rt = current_rt_.ptr();
+  Texture *rt = current_rt_[0].ptr();
   Texture *depth = depth_stencil_.ptr();
 
   // Close existing pass if RT/depth changed
@@ -2000,23 +2020,35 @@ bool D3D9Device::EnsureRenderEncoder() {
     if (depth_enable)
       dsv_flags = DepthStencilPlanarFlags(depth_stencil_format_);
 
-    Rc<Texture> rt_rc = current_rt_;
-    TextureViewKey rt_view = current_rt_view_;
-    Rc<TextureAllocation> rt_alloc(rt_rc->current());
+    struct RTCapture {
+      Rc<Texture> tex;
+      Rc<TextureAllocation> alloc;
+      TextureViewKey view;
+    };
+    uint32_t rt_count = current_rt_count_;
+    std::array<RTCapture, kMaxRenderTargets> rt_caps;
+    for (uint32_t i = 0; i < rt_count; i++) {
+      if (current_rt_[i]) {
+        rt_caps[i] = {current_rt_[i], Rc<TextureAllocation>(current_rt_[i]->current()), current_rt_view_[i]};
+      }
+    }
     Rc<Texture> depth_rc = depth_stencil_;
     TextureViewKey depth_view = depth_stencil_view_;
     Rc<TextureAllocation> ds_alloc(depth_enable && depth_rc ? depth_rc->current() : nullptr);
 
     chunk->emitcc([argbuf_size = std::move(argbuf_size_owner),
-                   rt_rc = std::move(rt_rc), rt_alloc = std::move(rt_alloc), rt_view,
+                   rt_caps = std::move(rt_caps), rt_count,
                    depth_rc = std::move(depth_rc), ds_alloc = std::move(ds_alloc), depth_view,
                    depth_enable, dsv_flags](ArgumentEncodingContext &ctx) {
-      auto &pass = *ctx.startRenderPass(dsv_flags, 0, 1, *argbuf_size);
-      auto &color = pass.colors[0];
-      color.attachment = ctx.access(rt_rc, rt_alloc.ptr(), rt_view, DXMT_ENCODER_RESOURCE_ACESS_READWRITE);
-      color.depth_plane = 0;
-      color.load_action = WMTLoadActionLoad;
-      color.store_action = WMTStoreActionStore;
+      auto &pass = *ctx.startRenderPass(dsv_flags, 0, rt_count, *argbuf_size);
+      for (uint32_t i = 0; i < rt_count; i++) {
+        if (!rt_caps[i].tex) continue;
+        auto &color = pass.colors[i];
+        color.attachment = ctx.access(rt_caps[i].tex, rt_caps[i].alloc.ptr(), rt_caps[i].view, DXMT_ENCODER_RESOURCE_ACESS_READWRITE);
+        color.depth_plane = 0;
+        color.load_action = WMTLoadActionLoad;
+        color.store_action = WMTStoreActionStore;
+      }
       if (depth_enable && depth_rc) {
         pass.depth.attachment = ctx.access(depth_rc, ds_alloc.ptr(), depth_view, DXMT_ENCODER_RESOURCE_ACESS_READWRITE);
         pass.depth.load_action = WMTLoadActionLoad;
@@ -2027,8 +2059,8 @@ bool D3D9Device::EnsureRenderEncoder() {
           pass.stencil.store_action = WMTStoreActionStore;
         }
       }
-      pass.render_target_width = rt_rc->width();
-      pass.render_target_height = rt_rc->height();
+      pass.render_target_width = rt_caps[0].tex->width();
+      pass.render_target_height = rt_caps[0].tex->height();
       pass.render_target_array_length = 1;
       pass.default_raster_sample_count = 1;
       ctx.bumpVisibilityResultOffset();

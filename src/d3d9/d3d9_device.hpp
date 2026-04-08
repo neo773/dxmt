@@ -311,12 +311,13 @@ private:
   D3DLIGHT9 lights_[kMaxLights] = {};
   BOOL light_enabled_[kMaxLights] = {};
 
-  // Current render target (defaults to backbuffer)
-  Com<D3D9Surface> current_rt_surface_;
-  Com<IDirect3DSurface9> current_rt_iface_; // for GetRenderTarget (works with both D3D9Surface and D3D9TextureSurface)
-  Rc<Texture> current_rt_;
-  TextureViewKey current_rt_view_ = 0;
-  WMTPixelFormat current_rt_format_ = WMTPixelFormatBGRA8Unorm;
+  // Render targets (up to 4 MRTs, RT0 defaults to backbuffer)
+  static constexpr uint32_t kMaxRenderTargets = 4;
+  Com<IDirect3DSurface9> current_rt_iface_[kMaxRenderTargets];
+  Rc<Texture> current_rt_[kMaxRenderTargets];
+  TextureViewKey current_rt_view_[kMaxRenderTargets] = {};
+  WMTPixelFormat current_rt_format_[kMaxRenderTargets] = {WMTPixelFormatBGRA8Unorm};
+  uint32_t current_rt_count_ = 1;
 
   // Depth/stencil
   Rc<Texture> depth_stencil_;
