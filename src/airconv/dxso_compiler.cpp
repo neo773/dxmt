@@ -137,6 +137,7 @@ static void compileVertexShader(
   uint32_t vs_ab_cbuf = vs_argbuf.DefineBuffer(
     "vs_constants", AddressSpace::constant, MemoryAccess::read, msl_float4);
   uint32_t vs_ab_cbuf_size = vs_argbuf.DefineInteger64("vs_const_buf_size");
+  uint32_t vs_ab_half_pixel = vs_argbuf.DefineInteger64("half_pixel_offset");
 
   auto [vs_argbuf_type, vs_argbuf_md] = vs_argbuf.Build(context, module.getDataLayout());
   uint32_t vs_argbuf_idx = func_sig.DefineInput(ArgumentBindingIndirectBuffer{
@@ -1140,10 +1141,27 @@ static void compileVertexShader(
         break;
       }
     }
-    auto *posVal = builder.CreateLoad(float4Ty, builder.CreateGEP(
+    Value *posVal = builder.CreateLoad(float4Ty, builder.CreateGEP(
       ArrayType::get(float4Ty, max_output_reg), outputArray,
       {builder.getInt32(0), builder.getInt32(posReg)}));
-    // Sanitize position: ensure w != 0 for proper perspective division
+
+    // DX9 half-pixel offset compensation: oPos.xy -= halfPixel * oPos.w
+    // halfPixel = float2(1.0/viewportWidth, 1.0/viewportHeight), packed as two floats in a uint64
+    auto *halfPixelRaw = builder.CreateLoad(
+      vs_argbuf_type->getElementType(vs_ab_half_pixel),
+      builder.CreateStructGEP(vs_argbuf_type, vs_argbuf_ptr, vs_ab_half_pixel));
+    auto *halfPixelBits = builder.CreateBitCast(halfPixelRaw,
+      FixedVectorType::get(types._float, 2));
+    auto *hpx = builder.CreateExtractElement(halfPixelBits, builder.getInt32(0));
+    auto *hpy = builder.CreateExtractElement(halfPixelBits, builder.getInt32(1));
+    auto *posW = builder.CreateExtractElement(posVal, builder.getInt32(3));
+    auto *posX = builder.CreateExtractElement(posVal, builder.getInt32(0));
+    auto *posY = builder.CreateExtractElement(posVal, builder.getInt32(1));
+    posX = builder.CreateFSub(posX, builder.CreateFMul(hpx, posW));
+    posY = builder.CreateFSub(posY, builder.CreateFMul(hpy, posW));
+    posVal = builder.CreateInsertElement(posVal, posX, builder.getInt32(0));
+    posVal = builder.CreateInsertElement(posVal, posY, builder.getInt32(1));
+
     retVal = builder.CreateInsertValue(retVal, posVal, {position_out_idx});
   }
 

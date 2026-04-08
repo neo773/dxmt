@@ -2197,7 +2197,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   uint16_t ps_const_count = ps_needs_special_regs ? 256 : ps_const_count_base;
   uint64_t ps_const_buf_size = ps_const_count * 4 * sizeof(float);
   uint64_t vb_region_size = num_vb_slots * VB_ENTRY_SIZE;
-  constexpr uint64_t VS_ARGBUF_STRUCT_SIZE = 3 * 8;
+  constexpr uint64_t VS_ARGBUF_STRUCT_SIZE = 4 * 8;
   constexpr uint64_t PS_ARGBUF_STRUCT_SIZE = 18 * 8;
 
   // Update FF constants before version check
@@ -2430,6 +2430,15 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     vs_s[0] = ctx.getArgumentBufferGPUAddress(vb_off);
     vs_s[1] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
     vs_s[2] = (uint64_t)vs_const_count;
+    // Pack half-pixel offset as two floats in a uint64: float2(1/w, 1/h)
+    {
+      float hpx = 1.0f / (float)vp.Width;
+      float hpy = 1.0f / (float)vp.Height;
+      uint32_t hpx_bits, hpy_bits;
+      memcpy(&hpx_bits, &hpx, 4);
+      memcpy(&hpy_bits, &hpy, 4);
+      vs_s[3] = (uint64_t)hpx_bits | ((uint64_t)hpy_bits << 32);
+    }
     { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
       c.type = WMTRenderCommandSetVertexBufferOffset;
       c.offset = ctx.getFinalArgumentBufferOffset(vs_struct_off); c.index = 29; }
