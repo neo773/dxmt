@@ -75,8 +75,8 @@ public:
                                            IDirect3DTexture9 **ppTexture, HANDLE *pSharedHandle) final;
   HRESULT STDMETHODCALLTYPE CreateVolumeTexture(UINT, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
                                                  IDirect3DVolumeTexture9 **, HANDLE *) final { static bool w=false; if(!w){Logger::warn("D3D9: stub CreateVolumeTexture");w=true;} return D3DERR_INVALIDCALL; }
-  HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
-                                               IDirect3DCubeTexture9 **, HANDLE *) final { static bool w=false; if(!w){Logger::warn("D3D9: stub CreateCubeTexture");w=true;} return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE CreateCubeTexture(UINT EdgeLength, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
+                                               IDirect3DCubeTexture9 **ppCubeTexture, HANDLE *pSharedHandle) final;
 
   // Buffers
   HRESULT STDMETHODCALLTYPE CreateVertexBuffer(UINT Length, DWORD Usage, DWORD FVF, D3DPOOL Pool,
@@ -235,7 +235,7 @@ public:
 
   // Texture/sampler capture for emit-on-draw
   struct TexCapture {
-    Texture *texture; // raw pointer — lifetime ensured by Com<D3D9Texture2D> in bound_textures_[]
+    Texture *texture; // raw pointer — lifetime ensured by Com<IDirect3DBaseTexture9> in bound_textures_[]
     TextureViewKey viewKey;
     uint32_t stage;
   };
@@ -286,8 +286,8 @@ private:
   // Render states
   DWORD render_states_[256] = {};
 
-  // Texture bindings
-  Com<D3D9Texture2D> bound_textures_[16];
+  // Texture bindings (2D or Cube — dispatched via GetType())
+  Com<IDirect3DBaseTexture9> bound_textures_[16];
   uint16_t tex_bound_mask_ = 0; // bitmask of stages with bound textures
   DWORD sampler_states_[16][14] = {};
 

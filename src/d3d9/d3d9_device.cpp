@@ -985,15 +985,95 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateTexture(
   return S_OK;
 }
 
+// Cube texture creation
+HRESULT STDMETHODCALLTYPE D3D9Device::CreateCubeTexture(
+    UINT EdgeLength, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
+    IDirect3DCubeTexture9 **ppCubeTexture, HANDLE *pSharedHandle) {
+  if (!ppCubeTexture) return D3DERR_INVALIDCALL;
+
+  auto mtlFormat = ConvertD3D9Format(Format);
+  if (mtlFormat == WMTPixelFormatInvalid) {
+    Logger::warn(str::format("D3D9: CreateCubeTexture unsupported format ", (int)Format));
+    return D3DERR_INVALIDCALL;
+  }
+
+  UINT mipLevels = Levels;
+  if (mipLevels == 0)
+    mipLevels = (UINT)std::floor(std::log2((double)EdgeLength)) + 1;
+
+  WMTTextureInfo info = {};
+  info.pixel_format = mtlFormat;
+  info.width = EdgeLength;
+  info.height = EdgeLength;
+  info.depth = 1;
+  info.array_length = 1; // Metal handles 6 faces internally for cube type
+  info.type = WMTTextureTypeCube;
+  info.mipmap_level_count = mipLevels;
+  info.sample_count = 1;
+  info.usage = WMTTextureUsageShaderRead;
+  info.options = WMTResourceStorageModeShared;
+
+  auto texture = Rc(new Texture(info, dxmt_device_->device()));
+  texture->rename(texture->allocate({}));
+
+  TextureViewDescriptor viewDesc = {
+      .format = mtlFormat,
+      .type = WMTTextureTypeCube,
+      .firstMiplevel = 0,
+      .miplevelCount = mipLevels,
+      .firstArraySlice = 0,
+      .arraySize = 6,
+  };
+
+  TextureViewKey viewKey;
+  if (Format == D3DFMT_A8L8) {
+    WMTTextureSwizzleChannels swizzle = {
+      WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleGreen
+    };
+    viewKey = texture->createViewWithSwizzle(viewDesc, swizzle);
+  } else if (Format == D3DFMT_L8 || Format == D3DFMT_L16) {
+    WMTTextureSwizzleChannels swizzle = {
+      WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleRed, WMTTextureSwizzleOne
+    };
+    viewKey = texture->createViewWithSwizzle(viewDesc, swizzle);
+  } else {
+    viewKey = texture->createView(viewDesc);
+  }
+
+  auto *cubeTex = new D3D9TextureCube(this, EdgeLength, Levels, Format, std::move(texture), viewKey);
+
+  // Create sRGB view for formats that support it
+  WMTPixelFormat srgbFormat = WMTPixelFormatInvalid;
+  if (mtlFormat == WMTPixelFormatBGRA8Unorm) srgbFormat = WMTPixelFormatBGRA8Unorm_sRGB;
+  else if (mtlFormat == WMTPixelFormatRGBA8Unorm) srgbFormat = WMTPixelFormatRGBA8Unorm_sRGB;
+  else if (mtlFormat == WMTPixelFormatBC1_RGBA) srgbFormat = WMTPixelFormatBC1_RGBA_sRGB;
+  else if (mtlFormat == WMTPixelFormatBC2_RGBA) srgbFormat = WMTPixelFormatBC2_RGBA_sRGB;
+  else if (mtlFormat == WMTPixelFormatBC3_RGBA) srgbFormat = WMTPixelFormatBC3_RGBA_sRGB;
+  else if (mtlFormat == WMTPixelFormatR8Unorm) srgbFormat = WMTPixelFormatR8Unorm_sRGB;
+  if (srgbFormat != WMTPixelFormatInvalid) {
+    auto srgbKey = cubeTex->texture()->createView({
+        .format = srgbFormat,
+        .type = WMTTextureTypeCube,
+        .firstMiplevel = 0,
+        .miplevelCount = mipLevels,
+        .firstArraySlice = 0,
+        .arraySize = 6,
+    });
+    cubeTex->setSrgbView(srgbKey);
+  }
+
+  *ppCubeTexture = ref(cubeTex);
+  return S_OK;
+}
+
 HRESULT STDMETHODCALLTYPE D3D9Device::SetTexture(DWORD Stage, IDirect3DBaseTexture9 *pTexture) {
 #ifdef DXMT_PERF
   dxmt_device_->queue().CurrentFrameStatistics().d3d9_state_change_count++;
 #endif
   if (Stage >= 16) return D3DERR_INVALIDCALL;
-  auto *tex = static_cast<D3D9Texture2D *>(pTexture);
-  if (bound_textures_[Stage].ptr() == tex) return S_OK; // no-op
-  bound_textures_[Stage] = tex;
-  if (tex)
+  if (bound_textures_[Stage].ptr() == pTexture) return S_OK; // no-op
+  bound_textures_[Stage] = pTexture;
+  if (pTexture)
     tex_bound_mask_ |= (1u << Stage);
   else
     tex_bound_mask_ &= ~(1u << Stage);
@@ -2169,11 +2249,11 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   // 2. Upload dirty textures (must happen before opening render encoder — uses blit commands)
   for (uint32_t mask = tex_bound_mask_; mask; mask &= mask - 1) {
     uint32_t stage = __builtin_ctz(mask);
-    auto *tex = bound_textures_[stage].ptr();
-    if (tex && tex->isAnyDirty()) {
+    auto *base = bound_textures_[stage].ptr();
+    if (base && D3D9IsAnyDirty(base)) {
       InvalidateCurrentPass(); // close render pass if open before blit
       auto &queue = dxmt_device_->queue();
-      tex->uploadDirtyLevelsStaged(tex->texture(), queue);
+      D3D9UploadDirtyStaged(base, queue);
     }
   }
 
@@ -2187,10 +2267,10 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
 
     for (uint32_t mask = tex_bound_mask_; mask; mask &= mask - 1) {
       uint32_t stage = __builtin_ctz(mask);
-      auto *tex = bound_textures_[stage].ptr();
+      auto *base = bound_textures_[stage].ptr();
       bool wantSrgb = sampler_states_[stage][D3DSAMP_SRGBTEXTURE] != 0;
-      TextureViewKey texView = (wantSrgb && tex->hasSrgbView()) ? tex->srgbViewKey() : tex->viewKey();
-      tex_captures_[tex_capture_count_++] = {tex->texture().ptr(), texView, stage};
+      TextureViewKey texView = (wantSrgb && D3D9HasSrgbView(base)) ? D3D9GetSrgbViewKey(base) : D3D9GetViewKey(base);
+      tex_captures_[tex_capture_count_++] = {D3D9GetTexture(base).ptr(), texView, stage};
 
       SamplerKey samplerKey;
       memcpy(samplerKey.state, sampler_states_[stage], sizeof(samplerKey.state));

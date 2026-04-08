@@ -13,8 +13,6 @@ class D3D9PixelShader;
 class D3D9VertexDeclaration;
 class D3D9VertexBuffer;
 class D3D9IndexBuffer;
-class D3D9Texture2D;
-
 class D3D9StateBlock final : public ComObjectClamp<IDirect3DStateBlock9> {
 public:
   D3D9StateBlock(D3D9Device *device) : device_(device) {}
@@ -62,7 +60,7 @@ private:
   UINT stream_offsets[16] = {};
   UINT stream_strides[16] = {};
   Com<D3D9IndexBuffer> ib;
-  Com<D3D9Texture2D> textures[16] = {};
+  Com<IDirect3DBaseTexture9> textures[16] = {};
 };
 
 } // namespace dxmt

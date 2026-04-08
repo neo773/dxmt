@@ -361,4 +361,275 @@ inline HRESULT STDMETHODCALLTYPE D3D9Texture2D::GetSurfaceLevel(UINT Level, IDir
   return S_OK;
 }
 
+// ============================================================================
+// Cube texture — 6 faces × N mip levels, backed by a single WMTTextureTypeCube
+// ============================================================================
+
+class D3D9TextureCube final : public ComObjectClamp<IDirect3DCubeTexture9> {
+public:
+  D3D9TextureCube(D3D9Device *device, UINT edgeLength, UINT levels,
+                  D3DFORMAT format, Rc<Texture> texture, TextureViewKey viewKey)
+      : device_(device), edgeLength_(edgeLength), format_(format),
+        texture_(std::move(texture)), viewKey_(viewKey) {
+    if (levels == 0)
+      levels = (UINT)std::floor(std::log2((double)edgeLength)) + 1;
+    levelCount_ = levels;
+
+    for (UINT face = 0; face < 6; face++) {
+      UINT mipW = edgeLength;
+      for (UINT i = 0; i < levelCount_; i++) {
+        MipLevel mip;
+        mip.width = mipW;
+        mip.height = mipW; // cube faces are square
+        mip.pitch = D3D9FormatPitch(format, mipW);
+        mip.dataSize = D3D9FormatMipSize(format, mipW, mipW);
+        mip.data = std::malloc(mip.dataSize);
+        std::memset(mip.data, 0, mip.dataSize);
+        mip.dirty = false;
+        faceMips_[face].push_back(mip);
+        mipW = std::max(1u, mipW / 2);
+      }
+    }
+  }
+
+  ~D3D9TextureCube() {
+    for (UINT face = 0; face < 6; face++)
+      for (auto &mip : faceMips_[face])
+        if (mip.data) std::free(mip.data);
+  }
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObj) final {
+    if (!ppvObj) return E_POINTER;
+    *ppvObj = nullptr;
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IDirect3DResource9) ||
+        riid == __uuidof(IDirect3DBaseTexture9) || riid == __uuidof(IDirect3DCubeTexture9)) {
+      *ppvObj = ref(this);
+      return S_OK;
+    }
+    return E_NOINTERFACE;
+  }
+
+  // IDirect3DResource9
+  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void *, DWORD, DWORD) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void *, DWORD *) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) final { return D3DERR_INVALIDCALL; }
+  DWORD STDMETHODCALLTYPE SetPriority(DWORD) final { return 0; }
+  DWORD STDMETHODCALLTYPE GetPriority() final { return 0; }
+  void STDMETHODCALLTYPE PreLoad() final {}
+  D3DRESOURCETYPE STDMETHODCALLTYPE GetType() final { return D3DRTYPE_CUBETEXTURE; }
+
+  // IDirect3DBaseTexture9
+  DWORD STDMETHODCALLTYPE SetLOD(DWORD) final { return 0; }
+  DWORD STDMETHODCALLTYPE GetLOD() final { return 0; }
+  DWORD STDMETHODCALLTYPE GetLevelCount() final { return levelCount_; }
+  HRESULT STDMETHODCALLTYPE SetAutoGenFilterType(D3DTEXTUREFILTERTYPE) final { return S_OK; }
+  D3DTEXTUREFILTERTYPE STDMETHODCALLTYPE GetAutoGenFilterType() final { return D3DTEXF_NONE; }
+  void STDMETHODCALLTYPE GenerateMipSubLevels() final {}
+
+  // IDirect3DCubeTexture9
+  HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT Level, D3DSURFACE_DESC *pDesc) final {
+    if (Level >= levelCount_ || !pDesc) return D3DERR_INVALIDCALL;
+    auto &mip = faceMips_[0][Level];
+    pDesc->Format = format_;
+    pDesc->Type = D3DRTYPE_SURFACE;
+    pDesc->Usage = 0;
+    pDesc->Pool = D3DPOOL_MANAGED;
+    pDesc->MultiSampleType = D3DMULTISAMPLE_NONE;
+    pDesc->MultiSampleQuality = 0;
+    pDesc->Width = mip.width;
+    pDesc->Height = mip.height;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE GetCubeMapSurface(D3DCUBEMAP_FACES FaceType, UINT Level,
+                                               IDirect3DSurface9 **ppSurface) final {
+    // Stub — games rarely call this directly
+    if (!ppSurface) return D3DERR_INVALIDCALL;
+    *ppSurface = nullptr;
+    return D3DERR_INVALIDCALL;
+  }
+
+  HRESULT STDMETHODCALLTYPE LockRect(D3DCUBEMAP_FACES FaceType, UINT Level,
+                                      D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) final {
+    if (FaceType > 5 || Level >= levelCount_ || !pLockedRect) return D3DERR_INVALIDCALL;
+    auto &mip = faceMips_[FaceType][Level];
+    pLockedRect->Pitch = mip.pitch;
+    if (pRect) {
+      UINT bytesPerPixel = mip.pitch / mip.width;
+      pLockedRect->pBits = static_cast<uint8_t *>(mip.data)
+        + pRect->top * mip.pitch + pRect->left * bytesPerPixel;
+    } else {
+      pLockedRect->pBits = mip.data;
+    }
+    if (!(Flags & D3DLOCK_NO_DIRTY_UPDATE)) {
+      mip.dirty = true;
+      anyDirty_ = true;
+    }
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE UnlockRect(D3DCUBEMAP_FACES FaceType, UINT Level) final {
+    if (FaceType > 5 || Level >= levelCount_) return D3DERR_INVALIDCALL;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE AddDirtyRect(D3DCUBEMAP_FACES FaceType, const RECT *) final {
+    if (FaceType > 5) return D3DERR_INVALIDCALL;
+    if (!faceMips_[FaceType].empty()) {
+      faceMips_[FaceType][0].dirty = true;
+      anyDirty_ = true;
+    }
+    return S_OK;
+  }
+
+  // Internal accessors — same interface as D3D9Texture2D for texture binding
+  Rc<Texture> &texture() { return texture_; }
+  TextureViewKey viewKey() const { return viewKey_; }
+  TextureViewKey srgbViewKey() const { return srgbViewKey_; }
+  bool hasSrgbView() const { return srgbViewKey_ != 0; }
+  void setSrgbView(TextureViewKey key) { srgbViewKey_ = key; }
+  D3DFORMAT format() const { return format_; }
+  UINT edgeLength() const { return edgeLength_; }
+  UINT levelCount() const { return levelCount_; }
+  bool isAnyDirty() const { return anyDirty_; }
+
+  void uploadDirtyLevelsStaged(Rc<Texture> &gpuTex, dxmt::CommandQueue &queue) {
+    bool compressed = IsCompressedFormat(format_);
+    for (UINT face = 0; face < 6; face++) {
+      for (UINT i = 0; i < levelCount_; i++) {
+        auto &mip = faceMips_[face][i];
+        if (!mip.dirty) continue;
+
+        const void *srcData = mip.data;
+        UINT srcPitch = mip.pitch;
+        UINT uploadHeight = mip.height;
+        UINT uploadPitch = srcPitch;
+
+        std::vector<uint32_t> convertedBuf;
+        if (format_ == D3DFMT_A4R4G4B4) {
+          uploadPitch = mip.width * 4;
+          convertedBuf.resize(mip.width * mip.height);
+          auto *src16 = (const uint16_t *)mip.data;
+          for (UINT row = 0; row < mip.height; row++) {
+            for (UINT col = 0; col < mip.width; col++) {
+              uint16_t px = src16[row * (srcPitch / 2) + col];
+              uint8_t a4 = (px >> 12) & 0xF;
+              uint8_t r4 = (px >> 8) & 0xF;
+              uint8_t g4 = (px >> 4) & 0xF;
+              uint8_t b4 = px & 0xF;
+              convertedBuf[row * mip.width + col] =
+                (uint32_t)(b4 * 17) | ((uint32_t)(g4 * 17) << 8) |
+                ((uint32_t)(r4 * 17) << 16) | ((uint32_t)(a4 * 17) << 24);
+            }
+          }
+          srcData = convertedBuf.data();
+          srcPitch = uploadPitch;
+        }
+
+        if (compressed)
+          uploadHeight = (mip.height + 3) / 4;
+
+        size_t uploadSize = (size_t)uploadPitch * uploadHeight;
+        auto staging = queue.AllocateTransientBuffer(uploadSize, 16);
+        std::memcpy(staging.cpu_ptr, srcData, uploadSize);
+
+        auto chunk = queue.CurrentChunk();
+        Rc<TextureAllocation> texAlloc(gpuTex->current());
+        chunk->emitcc([
+          tex = gpuTex,
+          texAlloc = std::move(texAlloc),
+          stagingBuf = staging.buffer.handle,
+          stagingOff = (uint64_t)staging.offset,
+          w = mip.width, h = mip.height,
+          pitch = uploadPitch, level = i, slice = face
+        ](ArgumentEncodingContext &ctx) mutable {
+          ctx.startBlitPass();
+          auto dstHandle = ctx.access(texAlloc.ptr(), DXMT_ENCODER_RESOURCE_ACESS_WRITE);
+          auto &blitCmd = ctx.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture>();
+          blitCmd.type = WMTBlitCommandCopyFromBufferToTexture;
+          blitCmd.src = stagingBuf;
+          blitCmd.src_offset = stagingOff;
+          blitCmd.bytes_per_row = pitch;
+          blitCmd.bytes_per_image = 0;
+          blitCmd.dst = dstHandle;
+          blitCmd.level = level;
+          blitCmd.slice = slice;
+          blitCmd.origin = {0, 0, 0};
+          blitCmd.size = {w, h, 1};
+          ctx.endPass();
+        });
+
+        mip.dirty = false;
+      }
+    }
+    anyDirty_ = false;
+  }
+
+private:
+  struct MipLevel {
+    UINT width;
+    UINT height;
+    UINT pitch;
+    size_t dataSize;
+    void *data = nullptr;
+    bool dirty = false;
+  };
+
+  D3D9Device *device_;
+  UINT edgeLength_;
+  D3DFORMAT format_;
+  UINT levelCount_;
+  bool anyDirty_ = false;
+  std::vector<MipLevel> faceMips_[6]; // one vector per face
+
+  Rc<Texture> texture_;
+  TextureViewKey viewKey_;
+  TextureViewKey srgbViewKey_ = 0;
+};
+
+// ============================================================================
+// Helpers — type-dispatch for bound texture access (2D or Cube)
+// ============================================================================
+
+inline Rc<Texture> &D3D9GetTexture(IDirect3DBaseTexture9 *base) {
+  if (base->GetType() == D3DRTYPE_CUBETEXTURE)
+    return static_cast<D3D9TextureCube *>(base)->texture();
+  return static_cast<D3D9Texture2D *>(base)->texture();
+}
+
+inline TextureViewKey D3D9GetViewKey(IDirect3DBaseTexture9 *base) {
+  if (base->GetType() == D3DRTYPE_CUBETEXTURE)
+    return static_cast<D3D9TextureCube *>(base)->viewKey();
+  return static_cast<D3D9Texture2D *>(base)->viewKey();
+}
+
+inline TextureViewKey D3D9GetSrgbViewKey(IDirect3DBaseTexture9 *base) {
+  if (base->GetType() == D3DRTYPE_CUBETEXTURE)
+    return static_cast<D3D9TextureCube *>(base)->srgbViewKey();
+  return static_cast<D3D9Texture2D *>(base)->srgbViewKey();
+}
+
+inline bool D3D9HasSrgbView(IDirect3DBaseTexture9 *base) {
+  if (base->GetType() == D3DRTYPE_CUBETEXTURE)
+    return static_cast<D3D9TextureCube *>(base)->hasSrgbView();
+  return static_cast<D3D9Texture2D *>(base)->hasSrgbView();
+}
+
+inline bool D3D9IsAnyDirty(IDirect3DBaseTexture9 *base) {
+  if (base->GetType() == D3DRTYPE_CUBETEXTURE)
+    return static_cast<D3D9TextureCube *>(base)->isAnyDirty();
+  return static_cast<D3D9Texture2D *>(base)->isAnyDirty();
+}
+
+inline void D3D9UploadDirtyStaged(IDirect3DBaseTexture9 *base, dxmt::CommandQueue &queue) {
+  if (base->GetType() == D3DRTYPE_CUBETEXTURE) {
+    auto *cube = static_cast<D3D9TextureCube *>(base);
+    cube->uploadDirtyLevelsStaged(cube->texture(), queue);
+  } else {
+    auto *tex = static_cast<D3D9Texture2D *>(base);
+    tex->uploadDirtyLevelsStaged(tex->texture(), queue);
+  }
+}
+
 } // namespace dxmt

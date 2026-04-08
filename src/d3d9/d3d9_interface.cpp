@@ -155,7 +155,7 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormat(
 
   // HACK(wow-launch): reject-list approach — reject unsupported resource types and unmapped formats
   // Proper fix: full format capability table
-  if (RType == D3DRTYPE_CUBETEXTURE || RType == D3DRTYPE_VOLUMETEXTURE)
+  if (RType == D3DRTYPE_VOLUMETEXTURE)
     return D3DERR_NOTAVAILABLE;
 
   // For depth/stencil usage, accept known depth formats
@@ -255,16 +255,22 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::GetDeviceCaps(
   pCaps->ShadeCaps = D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB |
                      D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD;
 
-  // -- Texture caps (no cube maps, no volume textures — CheckDeviceFormat rejects both) --
+  // -- Texture caps (cube maps supported, no volume textures) --
   pCaps->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_POW2 |
-                       D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_PERSPECTIVE;
+                       D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_PERSPECTIVE |
+                       D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP;
 
   // -- Texture filter caps (min/mag/mip all mapped in ConvertD3D9SamplerState) --
   pCaps->TextureFilterCaps = D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR |
                              D3DPTFILTERCAPS_MINFANISOTROPIC | D3DPTFILTERCAPS_MAGFPOINT |
                              D3DPTFILTERCAPS_MAGFLINEAR | D3DPTFILTERCAPS_MIPFPOINT |
                              D3DPTFILTERCAPS_MIPFLINEAR;
-  // No cube/volume texture support, leave CubeTextureFilterCaps and VolumeTextureFilterCaps at 0
+  // Cube texture filter caps (same as 2D)
+  pCaps->CubeTextureFilterCaps = D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR |
+                                  D3DPTFILTERCAPS_MINFANISOTROPIC | D3DPTFILTERCAPS_MAGFPOINT |
+                                  D3DPTFILTERCAPS_MAGFLINEAR | D3DPTFILTERCAPS_MIPFPOINT |
+                                  D3DPTFILTERCAPS_MIPFLINEAR;
+  // No volume texture support, leave VolumeTextureFilterCaps at 0
 
   // -- Texture address caps (MIRRORONCE not mapped in convertAddr, omit it) --
   pCaps->TextureAddressCaps = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR |
