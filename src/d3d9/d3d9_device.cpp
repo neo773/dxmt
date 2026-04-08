@@ -63,6 +63,11 @@ D3D9Device::D3D9Device(IDirect3D9 *pD3D9, HWND hFocusWindow, D3DPRESENT_PARAMETE
   auto mtl_device = devices.object(0);
   dxmt_device_ = CreateDXMTDevice({.device = mtl_device});
 
+  // Initialize dynamic buffer ring allocator (4MB blocks, shared storage)
+  dynamic_buffer_ring_.emplace(StagingBufferBlockAllocator{
+      mtl_device, WMTResourceOptionCPUCacheModeWriteCombined |
+                  WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModeShared});
+
   // Preload: compile all cached shaders to MTLLibrary ahead of first use
   ShaderCache::getInstance(dxmt_device_->metalVersion())
       .preload(dxmt_device_->device());
@@ -1063,7 +1068,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateVertexBuffer(
     IDirect3DVertexBuffer9 **ppVertexBuffer, HANDLE *pSharedHandle) {
   if (!ppVertexBuffer) return D3DERR_INVALIDCALL;
 
-  auto buffer = Rc(new Buffer(BufferRecyclePool::sizeClass(Length), dxmt_device_->device()));
+  auto buffer = Rc(new Buffer(Length, dxmt_device_->device()));
   Flags<BufferAllocationFlag> bufFlags;
   bufFlags.set(BufferAllocationFlag::CpuPlaced);
   auto allocation = buffer->allocate(bufFlags);
@@ -1082,7 +1087,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateIndexBuffer(
   if (!ppIndexBuffer) return D3DERR_INVALIDCALL;
   if (Format != D3DFMT_INDEX16 && Format != D3DFMT_INDEX32) return D3DERR_INVALIDCALL;
 
-  auto buffer = Rc(new Buffer(BufferRecyclePool::sizeClass(Length), dxmt_device_->device()));
+  auto buffer = Rc(new Buffer(Length, dxmt_device_->device()));
   Flags<BufferAllocationFlag> bufFlags;
   bufFlags.set(BufferAllocationFlag::CpuPlaced);
   auto allocation = buffer->allocate(bufFlags);
@@ -2213,7 +2218,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
       vb_fingerprint ^= transient_vb_override_.gpu_address * 0x9E3779B97F4A7C15ULL;
       vb_fingerprint ^= (uint64_t)transient_vb_override_.stride << 32;
     } else if (stream_sources_[slot]) {
-      vb_fingerprint ^= reinterpret_cast<uint64_t>(stream_sources_[slot]->allocation()) * 0x9E3779B97F4A7C15ULL;
+      vb_fingerprint ^= stream_sources_[slot]->gpuAddress() * 0x9E3779B97F4A7C15ULL;
       vb_fingerprint ^= (uint64_t)stream_strides_[slot] << 32;
       vb_fingerprint ^= (uint64_t)stream_offsets_[slot];
     }
@@ -2435,7 +2440,6 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   if (!vb_reuse && slot_mask) {
     // Full path: capture and write VB entries
     struct VBCapture {
-      Rc<BufferAllocation> alloc;
       WMT::Buffer raw_buffer;
       uint64_t gpu_address = 0;
       UINT offset = 0;
@@ -2454,10 +2458,8 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
         vc.stride = stream_strides_[slot];
         vc.offset = stream_offsets_[slot];
         if (stream_sources_[slot]) {
-          auto *alloc = stream_sources_[slot]->allocation();
-          vc.raw_buffer = alloc->buffer();
-          vc.gpu_address = alloc->gpuAddress();
-          vc.alloc = Rc(alloc);
+          vc.raw_buffer = stream_sources_[slot]->rawBuffer();
+          vc.gpu_address = stream_sources_[slot]->gpuAddress();
         }
       }
     }
@@ -2636,7 +2638,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::DrawIndexedPrimitive(
   if (PrimitiveType == D3DPT_TRIANGLEFAN) {
     bool is32 = (current_ib_->format() == D3DFMT_INDEX32);
     UINT srcStride = is32 ? 4 : 2;
-    auto *srcData = (const uint8_t *)current_ib_->allocation()->mappedMemory(0)
+    auto *srcData = (const uint8_t *)current_ib_->mappedMemory()
                     + StartIndex * srcStride;
 
     std::vector<uint16_t> expandedIndices(indexCount);
@@ -2674,12 +2676,9 @@ HRESULT STDMETHODCALLTYPE D3D9Device::DrawIndexedPrimitive(
   UINT indexStride = (indexType == WMTIndexTypeUInt32) ? 4 : 2;
   uint64_t indexBufferOffset = StartIndex * indexStride;
 
-  // Always capture allocation at draw time — Lock rename (even non-DISCARD)
-  // changes buffer->current(), so ctx.access at encoding time would be wrong
-  auto *ib_alloc = current_ib_->allocation();
+  // Capture buffer state at draw time — Lock may change backing storage
   EmitDrawIndexedCommand(mtlPrimType, indexCount, indexType,
-                         ib_alloc->buffer(), indexBufferOffset, BaseVertexIndex,
-                         Rc<BufferAllocation>(ib_alloc));
+                         current_ib_->rawBuffer(), indexBufferOffset, BaseVertexIndex);
   return S_OK;
 }
 
@@ -2868,16 +2867,12 @@ HRESULT STDMETHODCALLTYPE D3D9Device::Present(
   perf_draw_counter_ = 0;
 #endif
 
-  auto evicted = recycle_pool_.trim(dxmt_device_->queue().CoherentSeqId());
+  dynamic_buffer_ring_->free_blocks(dxmt_device_->queue().CoherentSeqId());
 
   InvalidateCurrentPass();
 
   auto &queue = dxmt_device_->queue();
   auto chunk = queue.CurrentChunk();
-
-  if (!evicted.empty()) {
-    chunk->emitcc([evicted = std::move(evicted)](ArgumentEncodingContext &) {});
-  }
 
   double vsync = (present_params_.PresentationInterval & D3DPRESENT_INTERVAL_IMMEDIATE)
       ? 0.0 : 1.0 / init_refresh_rate_;

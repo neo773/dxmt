@@ -7,6 +7,7 @@
 #include "dxmt_command_queue.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_device.hpp"
+#include "dxmt_ring_bump_allocator.hpp"
 #include "dxmt_hud_state.hpp"
 #include "dxmt_presenter.hpp"
 #include "dxmt_texture.hpp"
@@ -16,6 +17,7 @@
 #include <array>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <d3d9.h>
@@ -228,7 +230,7 @@ public:
   // Internal accessors
   WMT::Device GetMTLDevice() { return dxmt_device_->device(); }
   CommandQueue &GetQueue() { return dxmt_device_->queue(); }
-  BufferRecyclePool &GetRecyclePool() { return recycle_pool_; }
+  RingBumpState<StagingBufferBlockAllocator, 0x400000> &GetDynamicBufferRing() { return *dynamic_buffer_ring_; }
 
   // Texture/sampler capture for emit-on-draw
   struct TexCapture {
@@ -519,7 +521,7 @@ private:
   WMT::Reference<WMT::Function> GetOrCreateFFPS(const FFPSKey &key);
   void UpdateFFConstants(); // incremental update of cached_ff_vs_/ps_ using ff_dirty_
 
-  BufferRecyclePool recycle_pool_;
+  std::optional<RingBumpState<StagingBufferBlockAllocator, 0x400000>> dynamic_buffer_ring_;
 };
 
 } // namespace dxmt
