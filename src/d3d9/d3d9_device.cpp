@@ -68,6 +68,9 @@ D3D9Device::D3D9Device(IDirect3D9 *pD3D9, HWND hFocusWindow, D3DPRESENT_PARAMETE
       mtl_device, WMTResourceOptionCPUCacheModeWriteCombined |
                   WMTResourceHazardTrackingModeUntracked | WMTResourceStorageModeShared});
 
+  // Initialize async PSO compilation scheduler
+  pso_scheduler_.emplace();
+
   // Preload: compile all cached shaders to MTLLibrary ahead of first use
   ShaderCache::getInstance(dxmt_device_->metalVersion())
       .preload(dxmt_device_->device());
@@ -1592,8 +1595,8 @@ static WMTBlendOperation ConvertBlendOp(DWORD d3dOp) {
 }
 
 // PSO creation — compiles vertex shader with current vertex declaration's input layout
-obj_handle_t D3D9Device::CreatePSO() {
-  if (!current_vdecl_) return 0;
+D3D9CompiledPipeline *D3D9Device::CreatePSO() {
+  if (!current_vdecl_) return nullptr;
 
   // Fast path: reuse cached PSO if no relevant state changed
   if (!pso_dirty_ && cached_pso_)
@@ -1666,7 +1669,7 @@ obj_handle_t D3D9Device::CreatePSO() {
       Logger::err("D3D9: FF VS compilation failed");
     }
   }
-  if (!vs_handle) return 0;
+  if (!vs_handle) return nullptr;
 
   // Determine alpha test and fog state for custom PS
   uint8_t alphaFunc = 0;
@@ -1751,7 +1754,7 @@ obj_handle_t D3D9Device::CreatePSO() {
       Logger::err("D3D9: FF PS compilation failed");
     }
   }
-  if (!ps_handle) return 0;
+  if (!ps_handle) return nullptr;
 
   DWORD blendEnable = render_states_[D3DRS_ALPHABLENDENABLE];
   DWORD srcBlend = render_states_[D3DRS_SRCBLEND];
@@ -1775,7 +1778,7 @@ obj_handle_t D3D9Device::CreatePSO() {
   }
   auto it = pso_cache_.find(key);
   if (it != pso_cache_.end()) {
-    cached_pso_ = it->second.handle;
+    cached_pso_ = it->second.get();
     cached_pso_key_ = key;
     pso_dirty_ = false;
     return cached_pso_;
@@ -1805,6 +1808,8 @@ obj_handle_t D3D9Device::CreatePSO() {
   pipeline_info.rasterization_enabled = true;
   pipeline_info.raster_sample_count = 1;
   pipeline_info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
+  pipeline_info.immutable_vertex_buffers = (1 << 29) | (1 << 30);
+  pipeline_info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
 
   // Blend state
   if (blendEnable) {
@@ -1825,25 +1830,19 @@ obj_handle_t D3D9Device::CreatePSO() {
       pipeline_info.stencil_pixel_format = WMTPixelFormatDepth32Float_Stencil8;
   }
 
-  WMT::Reference<WMT::Error> err;
-  auto pso = dxmt_device_->device().newRenderPipelineState(pipeline_info, err);
-
-  if (err || !pso) {
-    Logger::err("D3D9: Failed to create render pipeline state");
-    if (err) {
-      auto desc = err.description();
-      if (desc) Logger::err(desc.getUTF8String());
-    }
-    return {};
-  }
+  // Async PSO creation: submit to background thread, resolve on encode thread
+  auto pipeline = std::make_unique<D3D9CompiledPipeline>(dxmt_device_->device(), pipeline_info);
+  auto *pipeline_ptr = pipeline.get();
+  pso_scheduler_->submit(pipeline_ptr);
 
 #ifdef DXMT_PERF
   dxmt_device_->queue().CurrentFrameStatistics().d3d9_pso_miss_count++;
 #endif
-  pso_cache_.emplace(key, pso);
-  cached_pso_ = pso.handle;
+  pso_cache_.emplace(key, std::move(pipeline));
+  cached_pso_ = pipeline_ptr;
+  cached_pso_key_ = key;
   pso_dirty_ = false;
-  return pso.handle;
+  return pipeline_ptr;
 }
 
 // D3D9 sampler state → WMTSamplerInfo
@@ -2020,7 +2019,7 @@ bool D3D9Device::EnsureRenderEncoder() {
     encoder_state_ = EncoderState::RenderActive;
 
     // Reset per-pass tracking to force re-emit on first draw
-    last_emitted_pso_ = 0;
+    last_emitted_pso_ = nullptr;
     last_emitted_dsso_ = 0;
     last_emitted_stencil_ref_ = ~0u;
     last_emitted_cull_ = (WMTCullMode)~0u;
@@ -2360,7 +2359,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   bool tex_reuse = (tex_sampler_fingerprint_ == last_tex_fingerprint_) && last_ps_tex_argbuf_off_;
 
   // State change tracking
-  obj_handle_t pso = cached_pso_;
+  D3D9CompiledPipeline *pso = cached_pso_;
   bool emit_pso = (pso != last_emitted_pso_);
   obj_handle_t dsso = cached_dsso_;
   uint32_t stencil_ref = cached_stencil_ref_;
@@ -2393,7 +2392,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   chunk->emitcc([=](ArgumentEncodingContext &ctx) {
     if (emit_pso) {
       auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_setpso>();
-      cmd.type = WMTRenderCommandSetPSO; cmd.pso = pso;
+      cmd.type = WMTRenderCommandSetPSO; cmd.pso = pso->GetPipeline();
     }
     if (emit_dsso) {
       auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_setdsso>();

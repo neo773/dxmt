@@ -13,6 +13,7 @@
 #include "dxmt_texture.hpp"
 #include "d3d9_buffer.hpp"
 #include "d3d9_fixed_function.hpp"
+#include "d3d9_pipeline.hpp"
 #include "log/log.hpp"
 #include <array>
 #include <map>
@@ -246,7 +247,7 @@ public:
 
 private:
   HRESULT CreateBackbuffer(UINT width, UINT height);
-  obj_handle_t CreatePSO();
+  D3D9CompiledPipeline *CreatePSO();
   void UpdateStatistics(const FrameStatisticsContainer &statistics, uint64_t frame_id);
 
   static uint32_t TransformIndex(D3DTRANSFORMSTATETYPE state);
@@ -331,7 +332,7 @@ private:
 
   // Dirty flags — set by D3D9 state setters, cleared in PreDraw
   bool pso_dirty_ = true;
-  obj_handle_t cached_pso_ = 0;
+  D3D9CompiledPipeline *cached_pso_ = nullptr;
   bool vb_dirty_ = true;    // set by SetStreamSource
   bool tex_dirty_ = true;   // set by SetTexture, SetSamplerState, SetPixelShader, SetVertexShader
   bool vp_dirty_ = true;    // set by SetViewport
@@ -380,8 +381,9 @@ private:
       return h;
     }
   };
-  std::unordered_map<PSOKey, WMT::Reference<WMT::RenderPipelineState>, PSOKeyHash> pso_cache_;
+  std::unordered_map<PSOKey, std::unique_ptr<D3D9CompiledPipeline>, PSOKeyHash> pso_cache_;
   PSOKey cached_pso_key_ = {};
+  std::optional<task_scheduler<D3D9PipelineWork *>> pso_scheduler_;
 
   // Persistent FF VS constant buffer — only changed sections updated per draw
   float cached_ff_vs_[100][4] = {};
@@ -409,7 +411,7 @@ private:
   uint64_t *argbuf_size_ptr_ = nullptr; // deferred argbuf size (D3D11 pattern)
 
   // Per-pass delta tracking — reset when render pass opens
-  obj_handle_t last_emitted_pso_ = 0;
+  D3D9CompiledPipeline *last_emitted_pso_ = nullptr;
   obj_handle_t last_emitted_dsso_ = 0;
   uint32_t last_emitted_stencil_ref_ = ~0u;
   WMTCullMode last_emitted_cull_ = (WMTCullMode)~0u;
