@@ -130,8 +130,8 @@ public:
   HRESULT STDMETHODCALLTYPE GetLight(DWORD Index, D3DLIGHT9 *pLight) final;
   HRESULT STDMETHODCALLTYPE LightEnable(DWORD Index, BOOL Enable) final;
   HRESULT STDMETHODCALLTYPE GetLightEnable(DWORD Index, BOOL *pEnable) final;
-  HRESULT STDMETHODCALLTYPE SetClipPlane(DWORD, const float *) final { static bool w=false; if(!w){Logger::warn("D3D9: SetClipPlane not implemented");w=true;} return S_OK; }
-  HRESULT STDMETHODCALLTYPE GetClipPlane(DWORD, float *) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE SetClipPlane(DWORD Index, const float *pPlane) final;
+  HRESULT STDMETHODCALLTYPE GetClipPlane(DWORD Index, float *pPlane) final;
 
   // Render state
   HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE State, DWORD Value) final;
@@ -198,10 +198,10 @@ public:
   HRESULT STDMETHODCALLTYPE GetVertexShader(IDirect3DVertexShader9 **ppShader) final;
   HRESULT STDMETHODCALLTYPE SetVertexShaderConstantF(UINT StartRegister, const float *pConstantData, UINT Vector4fCount) final;
   HRESULT STDMETHODCALLTYPE GetVertexShaderConstantF(UINT StartRegister, float *pConstantData, UINT Vector4fCount) final;
-  HRESULT STDMETHODCALLTYPE SetVertexShaderConstantI(UINT, const int *, UINT) final { return S_OK; }
-  HRESULT STDMETHODCALLTYPE GetVertexShaderConstantI(UINT, int *, UINT) final { return D3DERR_INVALIDCALL; }
-  HRESULT STDMETHODCALLTYPE SetVertexShaderConstantB(UINT, const BOOL *, UINT) final { return S_OK; }
-  HRESULT STDMETHODCALLTYPE GetVertexShaderConstantB(UINT, BOOL *, UINT) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE SetVertexShaderConstantI(UINT StartRegister, const int *pConstantData, UINT Vector4iCount) final;
+  HRESULT STDMETHODCALLTYPE GetVertexShaderConstantI(UINT StartRegister, int *pConstantData, UINT Vector4iCount) final;
+  HRESULT STDMETHODCALLTYPE SetVertexShaderConstantB(UINT StartRegister, const BOOL *pConstantData, UINT BoolCount) final;
+  HRESULT STDMETHODCALLTYPE GetVertexShaderConstantB(UINT StartRegister, BOOL *pConstantData, UINT BoolCount) final;
 
   HRESULT STDMETHODCALLTYPE SetStreamSource(UINT StreamNumber, IDirect3DVertexBuffer9 *pStreamData,
                                              UINT OffsetInBytes, UINT Stride) final;
@@ -218,10 +218,10 @@ public:
   HRESULT STDMETHODCALLTYPE GetPixelShader(IDirect3DPixelShader9 **ppShader) final;
   HRESULT STDMETHODCALLTYPE SetPixelShaderConstantF(UINT StartRegister, const float *pConstantData, UINT Vector4fCount) final;
   HRESULT STDMETHODCALLTYPE GetPixelShaderConstantF(UINT StartRegister, float *pConstantData, UINT Vector4fCount) final;
-  HRESULT STDMETHODCALLTYPE SetPixelShaderConstantI(UINT, const int *, UINT) final { return S_OK; }
-  HRESULT STDMETHODCALLTYPE GetPixelShaderConstantI(UINT, int *, UINT) final { return D3DERR_INVALIDCALL; }
-  HRESULT STDMETHODCALLTYPE SetPixelShaderConstantB(UINT, const BOOL *, UINT) final { return S_OK; }
-  HRESULT STDMETHODCALLTYPE GetPixelShaderConstantB(UINT, BOOL *, UINT) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE SetPixelShaderConstantI(UINT StartRegister, const int *pConstantData, UINT Vector4iCount) final;
+  HRESULT STDMETHODCALLTYPE GetPixelShaderConstantI(UINT StartRegister, int *pConstantData, UINT Vector4iCount) final;
+  HRESULT STDMETHODCALLTYPE SetPixelShaderConstantB(UINT StartRegister, const BOOL *pConstantData, UINT BoolCount) final;
+  HRESULT STDMETHODCALLTYPE GetPixelShaderConstantB(UINT StartRegister, BOOL *pConstantData, UINT BoolCount) final;
 
   HRESULT STDMETHODCALLTYPE DrawRectPatch(UINT, const float *, const D3DRECTPATCH_INFO *) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE DrawTriPatch(UINT, const float *, const D3DTRIPATCH_INFO *) final { return D3DERR_INVALIDCALL; }
@@ -310,6 +310,15 @@ private:
   static constexpr DWORD kMaxLights = 8;
   D3DLIGHT9 lights_[kMaxLights] = {};
   BOOL light_enabled_[kMaxLights] = {};
+
+  // Clip planes (D3D9 supports up to 6)
+  float clip_planes_[6][4] = {};
+
+  // Integer and boolean shader constants (16 int4 + 16 bool each for VS and PS)
+  int vsConstantsI_[16][4] = {};
+  BOOL vsConstantsB_[16] = {};
+  int psConstantsI_[16][4] = {};
+  BOOL psConstantsB_[16] = {};
 
   // Render targets (up to 4 MRTs, RT0 defaults to backbuffer)
   static constexpr uint32_t kMaxRenderTargets = 4;

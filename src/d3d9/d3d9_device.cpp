@@ -1639,6 +1639,75 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetPixelShaderConstantF(
   return S_OK;
 }
 
+HRESULT STDMETHODCALLTYPE D3D9Device::SetVertexShaderConstantI(
+    UINT StartRegister, const int *pConstantData, UINT Vector4iCount) {
+  if (!pConstantData || StartRegister + Vector4iCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(&vsConstantsI_[StartRegister], pConstantData, Vector4iCount * 4 * sizeof(int));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::GetVertexShaderConstantI(
+    UINT StartRegister, int *pConstantData, UINT Vector4iCount) {
+  if (!pConstantData || StartRegister + Vector4iCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(pConstantData, &vsConstantsI_[StartRegister], Vector4iCount * 4 * sizeof(int));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::SetVertexShaderConstantB(
+    UINT StartRegister, const BOOL *pConstantData, UINT BoolCount) {
+  if (!pConstantData || StartRegister + BoolCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(&vsConstantsB_[StartRegister], pConstantData, BoolCount * sizeof(BOOL));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::GetVertexShaderConstantB(
+    UINT StartRegister, BOOL *pConstantData, UINT BoolCount) {
+  if (!pConstantData || StartRegister + BoolCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(pConstantData, &vsConstantsB_[StartRegister], BoolCount * sizeof(BOOL));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::SetPixelShaderConstantI(
+    UINT StartRegister, const int *pConstantData, UINT Vector4iCount) {
+  if (!pConstantData || StartRegister + Vector4iCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(&psConstantsI_[StartRegister], pConstantData, Vector4iCount * 4 * sizeof(int));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::GetPixelShaderConstantI(
+    UINT StartRegister, int *pConstantData, UINT Vector4iCount) {
+  if (!pConstantData || StartRegister + Vector4iCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(pConstantData, &psConstantsI_[StartRegister], Vector4iCount * 4 * sizeof(int));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::SetPixelShaderConstantB(
+    UINT StartRegister, const BOOL *pConstantData, UINT BoolCount) {
+  if (!pConstantData || StartRegister + BoolCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(&psConstantsB_[StartRegister], pConstantData, BoolCount * sizeof(BOOL));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::GetPixelShaderConstantB(
+    UINT StartRegister, BOOL *pConstantData, UINT BoolCount) {
+  if (!pConstantData || StartRegister + BoolCount > 16) return D3DERR_INVALIDCALL;
+  memcpy(pConstantData, &psConstantsB_[StartRegister], BoolCount * sizeof(BOOL));
+  return S_OK;
+}
+
+// Clip planes
+HRESULT STDMETHODCALLTYPE D3D9Device::SetClipPlane(DWORD Index, const float *pPlane) {
+  if (Index >= 6 || !pPlane) return D3DERR_INVALIDCALL;
+  memcpy(clip_planes_[Index], pPlane, 4 * sizeof(float));
+  return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9Device::GetClipPlane(DWORD Index, float *pPlane) {
+  if (Index >= 6 || !pPlane) return D3DERR_INVALIDCALL;
+  memcpy(pPlane, clip_planes_[Index], 4 * sizeof(float));
+  return S_OK;
+}
+
 // Stream source
 HRESULT STDMETHODCALLTYPE D3D9Device::SetStreamSource(
     UINT StreamNumber, IDirect3DVertexBuffer9 *pStreamData, UINT OffsetInBytes, UINT Stride) {
