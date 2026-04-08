@@ -332,6 +332,10 @@ static void compileVertexShader(
   auto *constBufFloat4 = builder.CreateBitCast(
     constBufRaw, float4Ty->getPointerTo((uint32_t)AddressSpace::constant));
 
+  // aL register — accessible for relative constant addressing inside loops
+  auto *aLReg = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "aL_reg");
+  builder.CreateStore(ConstantInt::get(builder.getInt32Ty(), 0), aLReg);
+
   // Pre-scan for Def/DefI instructions to collect inline constants
   std::unordered_map<uint32_t, std::array<float, 4>> defConstants;
   std::unordered_map<uint32_t, std::array<int32_t, 4>> defIConstants;
@@ -407,6 +411,13 @@ static void compileVertexShader(
         ArrayType::get(float4Ty, max_output_reg), outputArray,
         {builder.getInt32(0), builder.getInt32(mapOutputSlot(reg.id.type, reg.id.num))}));
       break;
+    case DxsoRegisterType::Loop: {
+      // aL register — integer loop counter, splat to float4 for use in relative addressing
+      auto *aLVal = builder.CreateLoad(builder.getInt32Ty(), aLReg);
+      auto *aLFloat = builder.CreateSIToFP(aLVal, types._float);
+      val = builder.CreateVectorSplat(4, aLFloat);
+      break;
+    }
     default:
       val = ConstantAggregateZero::get(float4Ty);
       break;
@@ -534,7 +545,9 @@ static void compileVertexShader(
     Kind kind;
     BasicBlock *merge_bb;    // target for EndIf/EndLoop
     BasicBlock *header_bb;   // loop header (for Loop only)
-    Value *counter;          // loop counter alloca (for Loop only)
+    Value *counter;          // loop iteration counter alloca
+    Value *aL_value;         // aL register alloca (initial + iteration * step)
+    int32_t step;            // aL increment per iteration
   };
   std::vector<FlowBlock> flow_stack;
 
@@ -891,7 +904,7 @@ static void compileVertexShader(
       auto *then_bb = BasicBlock::Create(context, "if_then", function);
       auto *merge_bb = BasicBlock::Create(context, "if_merge", function);
       builder.CreateCondBr(cond, then_bb, merge_bb);
-      flow_stack.push_back({FlowBlock::kIf, merge_bb, nullptr, nullptr});
+      flow_stack.push_back({FlowBlock::kIf, merge_bb, nullptr, nullptr, nullptr, 0});
       builder.SetInsertPoint(then_bb);
       break;
     }
@@ -903,7 +916,7 @@ static void compileVertexShader(
       auto *then_bb = BasicBlock::Create(context, "if_then", function);
       auto *merge_bb = BasicBlock::Create(context, "if_merge", function);
       builder.CreateCondBr(cond, then_bb, merge_bb);
-      flow_stack.push_back({FlowBlock::kIf, merge_bb, nullptr, nullptr});
+      flow_stack.push_back({FlowBlock::kIf, merge_bb, nullptr, nullptr, nullptr, 0});
       builder.SetInsertPoint(then_bb);
       break;
     }
@@ -947,12 +960,16 @@ static void compileVertexShader(
 
       auto *counter = builder.CreateAlloca(builder.getInt32Ty(), nullptr, "loop_ctr");
       uint32_t iterCount = 255;
-      // Read iteration count from DefI if available
+      int32_t initialVal = 0, stepVal = 1;
       uint32_t iReg = inst.src[0].id.num;
       auto defIt = defIConstants.find(iReg);
-      if (defIt != defIConstants.end())
+      if (defIt != defIConstants.end()) {
         iterCount = std::max(0, std::min((int)defIt->second[0], 255));
+        initialVal = defIt->second[1];
+        stepVal = defIt->second[2];
+      }
       builder.CreateStore(builder.getInt32(iterCount), counter);
+      builder.CreateStore(builder.getInt32(initialVal), aLReg);
 
       builder.CreateBr(header_bb);
       builder.SetInsertPoint(header_bb);
@@ -960,7 +977,7 @@ static void compileVertexShader(
       auto *done = builder.CreateICmpEQ(ctr, builder.getInt32(0));
       builder.CreateCondBr(done, exit_bb, body_bb);
       builder.SetInsertPoint(body_bb);
-      flow_stack.push_back({FlowBlock::kLoop, exit_bb, header_bb, counter});
+      flow_stack.push_back({FlowBlock::kLoop, exit_bb, header_bb, counter, aLReg, stepVal});
       break;
     }
     case DxsoOpcode::EndLoop: {
@@ -968,6 +985,9 @@ static void compileVertexShader(
         auto &fb = flow_stack.back();
         auto *ctr = builder.CreateLoad(builder.getInt32Ty(), fb.counter);
         builder.CreateStore(builder.CreateSub(ctr, builder.getInt32(1)), fb.counter);
+        // Advance aL by step
+        auto *aL = builder.CreateLoad(builder.getInt32Ty(), fb.aL_value);
+        builder.CreateStore(builder.CreateAdd(aL, builder.getInt32(fb.step)), fb.aL_value);
         builder.CreateBr(fb.header_bb);
         builder.SetInsertPoint(fb.merge_bb);
         flow_stack.pop_back();
@@ -991,7 +1011,7 @@ static void compileVertexShader(
       auto *done = builder.CreateICmpEQ(ctr, builder.getInt32(0));
       builder.CreateCondBr(done, exit_bb, body_bb);
       builder.SetInsertPoint(body_bb);
-      flow_stack.push_back({FlowBlock::kLoop, exit_bb, header_bb, counter});
+      flow_stack.push_back({FlowBlock::kLoop, exit_bb, header_bb, counter, nullptr, 0});
       break;
     }
     case DxsoOpcode::EndRep: {
@@ -999,6 +1019,10 @@ static void compileVertexShader(
         auto &fb = flow_stack.back();
         auto *ctr = builder.CreateLoad(builder.getInt32Ty(), fb.counter);
         builder.CreateStore(builder.CreateSub(ctr, builder.getInt32(1)), fb.counter);
+        if (fb.aL_value) {
+          auto *aL = builder.CreateLoad(builder.getInt32Ty(), fb.aL_value);
+          builder.CreateStore(builder.CreateAdd(aL, builder.getInt32(fb.step)), fb.aL_value);
+        }
         builder.CreateBr(fb.header_bb);
         builder.SetInsertPoint(fb.merge_bb);
         flow_stack.pop_back();
@@ -1159,7 +1183,8 @@ static void compileVertexShader(
       ArrayType::get(float4Ty, max_output_reg), outputArray,
       {builder.getInt32(0), builder.getInt32(posReg)}));
 
-    // DX9 half-pixel offset compensation: oPos.xy -= halfPixel * oPos.w
+    // DX9 half-pixel offset: shift geometry half-pixel to upper-left
+    // X shifts left (subtract), Y shifts up (add) in clip space
     // halfPixel = float2(1.0/viewportWidth, 1.0/viewportHeight), packed as two floats in a uint64
     auto *halfPixelRaw = builder.CreateLoad(
       vs_argbuf_type->getElementType(vs_ab_half_pixel),
@@ -1172,7 +1197,7 @@ static void compileVertexShader(
     auto *posX = builder.CreateExtractElement(posVal, builder.getInt32(0));
     auto *posY = builder.CreateExtractElement(posVal, builder.getInt32(1));
     posX = builder.CreateFSub(posX, builder.CreateFMul(hpx, posW));
-    posY = builder.CreateFSub(posY, builder.CreateFMul(hpy, posW));
+    posY = builder.CreateFAdd(posY, builder.CreateFMul(hpy, posW));
     posVal = builder.CreateInsertElement(posVal, posX, builder.getInt32(0));
     posVal = builder.CreateInsertElement(posVal, posY, builder.getInt32(1));
 

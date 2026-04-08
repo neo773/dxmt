@@ -2468,8 +2468,10 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   // Emit render state + constants + VS struct
   chunk->emitcc([=](ArgumentEncodingContext &ctx) {
     if (emit_pso) {
+      auto pso_handle = pso->GetPipeline();
+      if (!pso_handle) return; // PSO compilation failed — skip this draw
       auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_setpso>();
-      cmd.type = WMTRenderCommandSetPSO; cmd.pso = pso->GetPipeline();
+      cmd.type = WMTRenderCommandSetPSO; cmd.pso = pso_handle;
     }
     if (emit_dsso) {
       auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_setdsso>();
