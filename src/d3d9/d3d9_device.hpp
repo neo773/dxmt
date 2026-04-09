@@ -55,8 +55,8 @@ public:
   void STDMETHODCALLTYPE SetCursorPosition(int X, int Y, DWORD Flags) final;
   BOOL STDMETHODCALLTYPE ShowCursor(BOOL bShow) final;
 
-  HRESULT STDMETHODCALLTYPE CreateAdditionalSwapChain(D3DPRESENT_PARAMETERS *, IDirect3DSwapChain9 **) final { static bool w=false; if(!w){Logger::warn("D3D9: stub CreateAdditionalSwapChain");w=true;} return D3DERR_INVALIDCALL; }
-  HRESULT STDMETHODCALLTYPE GetSwapChain(UINT, IDirect3DSwapChain9 **) final { static bool w=false; if(!w){Logger::warn("D3D9: stub GetSwapChain");w=true;} return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE CreateAdditionalSwapChain(D3DPRESENT_PARAMETERS *, IDirect3DSwapChain9 **) final { fprintf(stderr,"DXMT: stub CreateAdditionalSwapChain\n");fflush(stderr); return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetSwapChain(UINT i, IDirect3DSwapChain9 **pp) final { fprintf(stderr,"DXMT: stub GetSwapChain(%u)\n",i);fflush(stderr); if(pp)*pp=nullptr; return D3DERR_INVALIDCALL; }
   UINT STDMETHODCALLTYPE GetNumberOfSwapChains() final { return 1; }
 
   HRESULT STDMETHODCALLTYPE Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) final;
@@ -356,6 +356,7 @@ private:
 
   // Depth/stencil surface (GPU-backed, set via SetDepthStencilSurface or auto-created)
   Com<D3D9Surface> depth_stencil_surface_;
+  Com<D3D9Surface> dummy_depth_surface_; // 1x1 fallback for games that ignore GetDepthStencilSurface errors
 
   // PSO cache (keyed by VS/PS function handles + vertex declaration + blend state + depth format)
   struct PSOKey {

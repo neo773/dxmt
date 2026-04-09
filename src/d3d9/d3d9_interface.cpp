@@ -48,7 +48,7 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::GetAdapterIdentifier(
   auto name = device.name().getUTF8String();
   strncpy(pIdentifier->Description, name.c_str(), sizeof(pIdentifier->Description) - 1);
 
-  pIdentifier->VendorId = 0x106B; // Apple
+  pIdentifier->VendorId = 0x8086; // Intel (GTA IV requires Intel/AMD, crashes with unknown vendors)
   pIdentifier->DeviceId = (DWORD)(device.registryID() & 0xFFFF);
 
   char buf[256];
@@ -150,12 +150,25 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceType(
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormat(
     UINT Adapter, D3DDEVTYPE, D3DFORMAT, DWORD Usage, D3DRESOURCETYPE RType, D3DFORMAT CheckFormat) {
+  Logger::info(str::format("D3D9: CheckDeviceFormat fmt=", (int)CheckFormat,
+      " usage=", Usage, " rtype=", (int)RType));
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
 
-  // HACK(wow-launch): reject-list approach — reject unsupported resource types and unmapped formats
-  // Proper fix: full format capability table
+  // Reject unsupported resource types
   if (RType == D3DRTYPE_VOLUMETEXTURE)
+    return D3DERR_NOTAVAILABLE;
+
+  // Reject proprietary depth-as-texture formats (DF24, DF16, INTZ, RAWZ, NULL)
+  // GTA IV: disabling DF formats forces better mirror render path (DXVK precedent)
+  constexpr D3DFORMAT D3DFMT_DF24 = (D3DFORMAT)MAKEFOURCC('D','F','2','4');
+  constexpr D3DFORMAT D3DFMT_DF16 = (D3DFORMAT)MAKEFOURCC('D','F','1','6');
+  constexpr D3DFORMAT D3DFMT_INTZ = (D3DFORMAT)MAKEFOURCC('I','N','T','Z');
+  constexpr D3DFORMAT D3DFMT_RAWZ = (D3DFORMAT)MAKEFOURCC('R','A','W','Z');
+  constexpr D3DFORMAT D3DFMT_NULL_RT = (D3DFORMAT)MAKEFOURCC('N','U','L','L');
+  if (CheckFormat == D3DFMT_DF24 || CheckFormat == D3DFMT_DF16 ||
+      CheckFormat == D3DFMT_INTZ || CheckFormat == D3DFMT_RAWZ ||
+      CheckFormat == D3DFMT_NULL_RT)
     return D3DERR_NOTAVAILABLE;
 
   // For depth/stencil usage, accept known depth formats
@@ -175,9 +188,30 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormat(
     }
   }
 
+  // For render target usage, also accept depth formats
+  if (Usage & D3DUSAGE_RENDERTARGET) {
+    // Depth formats are valid render targets
+    switch (CheckFormat) {
+    case D3DFMT_D16:
+    case D3DFMT_D16_LOCKABLE:
+    case D3DFMT_D24S8:
+    case D3DFMT_D24X8:
+    case D3DFMT_D24X4S4:
+    case D3DFMT_D24FS8:
+    case D3DFMT_D32:
+    case D3DFMT_D32F_LOCKABLE:
+      return S_OK;
+    default:
+      break;
+    }
+  }
+
   // For regular textures/surfaces, check if format is mappable
-  if (ConvertD3D9Format(CheckFormat) == WMTPixelFormatInvalid)
+  if (ConvertD3D9Format(CheckFormat) == WMTPixelFormatInvalid) {
+    Logger::warn(str::format("D3D9: CheckDeviceFormat rejected format=", (int)CheckFormat,
+                             " usage=", Usage, " rtype=", (int)RType));
     return D3DERR_NOTAVAILABLE;
+  }
 
   return S_OK;
 }

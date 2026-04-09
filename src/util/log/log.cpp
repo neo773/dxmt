@@ -86,8 +86,10 @@ void Logger::emitMsg(LogLevel level, const std::string &message) {
           std::cerr << adjusted;
       }
 
-      if (m_fileStream)
+      if (m_fileStream) {
         m_fileStream << adjusted;
+        m_fileStream.flush();
+      }
     }
   }
 }
@@ -98,9 +100,8 @@ std::string Logger::getFileName(const std::string &base) {
   if (path == "none")
     return std::string();
 
-  // Don't create a log file if we're writing to wine's console output
-  if (path.empty() && m_wineLogOutput)
-    return std::string();
+  // Always create a log file when DXMT_LOG_PATH is set
+  // (previously skipped when m_wineLogOutput was available)
 
   if (!path.empty() && *path.rbegin() != '/')
     path += '/';

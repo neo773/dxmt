@@ -443,7 +443,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::QueryInterface(REFIID riid, void **ppvObj)
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::TestCooperativeLevel() { return S_OK; }
-UINT STDMETHODCALLTYPE D3D9Device::GetAvailableTextureMem() { return 512 * 1024 * 1024; }
+UINT STDMETHODCALLTYPE D3D9Device::GetAvailableTextureMem() { return 128 * 1024 * 1024; }
 HRESULT STDMETHODCALLTYPE D3D9Device::EvictManagedResources() { return S_OK; }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetDirect3D(IDirect3D9 **ppD3D9) {
@@ -453,6 +453,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetDirect3D(IDirect3D9 **ppD3D9) {
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetDeviceCaps(D3DCAPS9 *pCaps) {
+  Logger::info("D3D9: GetDeviceCaps");
   return d3d9_->GetDeviceCaps(0, D3DDEVTYPE_HAL, pCaps);
 }
 
@@ -517,6 +518,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentation
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetBackBuffer(
     UINT iSwapChain, UINT iBackBuffer, D3DBACKBUFFER_TYPE Type, IDirect3DSurface9 **ppBackBuffer) {
+  Logger::info(str::format("D3D9: GetBackBuffer sc=", iSwapChain, " bb=", iBackBuffer,
+      " ptr=", (void*)backbuffer_surface_.ptr()));
   if (iSwapChain != 0 || iBackBuffer != 0 || !ppBackBuffer)
     return D3DERR_INVALIDCALL;
   *ppBackBuffer = ref(backbuffer_surface_.ptr());
@@ -598,6 +601,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, I
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9 **ppRenderTarget) {
+  Logger::info(str::format("D3D9: GetRenderTarget idx=", RenderTargetIndex));
   if (RenderTargetIndex >= kMaxRenderTargets || !ppRenderTarget)
     return D3DERR_INVALIDCALL;
   if (current_rt_iface_[RenderTargetIndex]) {
@@ -895,6 +899,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetTextureStageState(DWORD Stage, D3DTEXTU
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateTexture(
     UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DTexture9 **ppTexture, HANDLE *pSharedHandle) {
+  Logger::info(str::format("D3D9: CreateTexture ", Width, "x", Height,
+      " lvl=", Levels, " usage=", Usage, " fmt=", (int)Format, " (", D3D9FormatName(Format), ")"));
   if (!ppTexture) return D3DERR_INVALIDCALL;
 
   auto mtlFormat = ConvertD3D9Format(Format);
@@ -1157,8 +1163,20 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetDepthStencilSurface(IDirect3DSurface9 *
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetDepthStencilSurface(IDirect3DSurface9 **ppZStencilSurface) {
+  Logger::info(str::format("D3D9: GetDepthStencilSurface hasDS=", (bool)depth_stencil_surface_));
   if (!ppZStencilSurface) return D3DERR_INVALIDCALL;
-  if (!depth_stencil_surface_) return D3DERR_NOTFOUND;
+  if (!depth_stencil_surface_) {
+    // GTA IV workaround: game ignores D3DERR_NOTFOUND and writes to the null pointer.
+    // Create a dummy 1x1 depth surface to absorb the write.
+    if (!dummy_depth_surface_) {
+      Logger::info("D3D9: Creating dummy 1x1 depth surface for null-deref protection");
+      IDirect3DSurface9 *dummy = nullptr;
+      CreateDepthStencilSurface(1, 1, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, TRUE, &dummy, nullptr);
+      dummy_depth_surface_ = Com<D3D9Surface>(static_cast<D3D9Surface *>(dummy));
+    }
+    *ppZStencilSurface = ref(dummy_depth_surface_.ptr());
+    return D3DERR_NOTFOUND;
+  }
   *ppZStencilSurface = ref(depth_stencil_surface_.ptr());
   return S_OK;
 }
@@ -1187,6 +1205,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateDepthStencilSurface(
     UINT Width, UINT Height, D3DFORMAT Format,
     D3DMULTISAMPLE_TYPE MultiSample, DWORD MultisampleQuality,
     BOOL Discard, IDirect3DSurface9 **ppSurface, HANDLE *pSharedHandle) {
+  Logger::info(str::format("D3D9: CreateDepthStencilSurface ", Width, "x", Height,
+      " fmt=", (int)Format, " (", D3D9FormatName(Format), ")"));
   if (!ppSurface) return D3DERR_INVALIDCALL;
 
   auto mtlFormat = ConvertD3D9DepthFormat(Format);
