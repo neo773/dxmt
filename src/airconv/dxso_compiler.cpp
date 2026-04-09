@@ -131,9 +131,9 @@ static void compileVertexShader(
   }
 
   // Build VS argument buffer struct (bindless: replaces fixed slots 16, 17)
+  // VB entries are at buffer[16] as a direct buffer (supports setVertexBufferOffset).
+  // The argument buffer at buffer[29] only holds constants + config (never changes offset).
   ArgumentBufferBuilder vs_argbuf;
-  uint32_t vs_ab_vbuf = vs_argbuf.DefineBuffer(
-    "vertex_buffers", AddressSpace::constant, MemoryAccess::read, msl_uint);
   uint32_t vs_ab_cbuf = vs_argbuf.DefineBuffer(
     "vs_constants", AddressSpace::constant, MemoryAccess::read, msl_float4);
   uint32_t vs_ab_cbuf_size = vs_argbuf.DefineInteger64("vs_const_buf_size");
@@ -148,6 +148,16 @@ static void compileVertexShader(
     .struct_type = vs_argbuf_type,
     .struct_type_info = vs_argbuf_md,
     .arg_name = "vs_argument_buffer",
+  });
+
+  // VB entries as a direct buffer at index 16 (like D3D11 does)
+  uint32_t vb_direct_idx = func_sig.DefineInput(ArgumentBindingBuffer{
+    .location_index = 16,
+    .array_size = 1,
+    .memory_access = MemoryAccess::read,
+    .address_space = AddressSpace::constant,
+    .type = msl_uint,
+    .arg_name = "vertex_buffer_table",
   });
 
   uint32_t vertex_id_idx = func_sig.DefineInput(InputVertexID{});
@@ -186,11 +196,10 @@ static void compileVertexShader(
     builder.CreateStore(ConstantAggregateZero::get(float4Ty), ptr);
   }
 
-  // Load resources from VS argument buffer struct
+  // Load resources from VS argument buffer struct + direct VB buffer
   auto *vs_argbuf_ptr = function->getArg(vs_argbuf_idx);
-  auto *vbuf_table_raw = builder.CreateLoad(
-    vs_argbuf_type->getElementType(vs_ab_vbuf),
-    builder.CreateStructGEP(vs_argbuf_type, vs_argbuf_ptr, vs_ab_vbuf));
+  // VB entries come from direct buffer at index 16 (not through argument buffer)
+  auto *vbuf_table_raw = function->getArg(vb_direct_idx);
   auto *constBufRaw = builder.CreateLoad(
     vs_argbuf_type->getElementType(vs_ab_cbuf),
     builder.CreateStructGEP(vs_argbuf_type, vs_argbuf_ptr, vs_ab_cbuf));

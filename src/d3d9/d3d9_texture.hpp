@@ -3,6 +3,19 @@
 #include "com/com_object.hpp"
 #include "dxmt_texture.hpp"
 #include "d3d9_format.hpp"
+#include "log/log.hpp"
+#include "util_string.hpp"
+#include <windows.h>
+static inline void tex_trace(const char* msg) {
+  HANDLE h = CreateFileA("C:\\windows\\temp\\d3d9_trace.log", FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD written;
+    WriteFile(h, msg, strlen(msg), &written, NULL);
+    WriteFile(h, "\r\n", 2, &written, NULL);
+    FlushFileBuffers(h);
+    CloseHandle(h);
+  }
+}
 #include <d3d9.h>
 #include <cstdlib>
 #include <cstring>
@@ -59,7 +72,12 @@ public:
   }
 
   // IDirect3DResource9
-  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final {
+    if (!ppDevice) return D3DERR_INVALIDCALL;
+    *ppDevice = static_cast<IDirect3DDevice9 *>(device_);
+    (*ppDevice)->AddRef();
+    return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void *, DWORD, DWORD) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void *, DWORD *) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) final { return D3DERR_INVALIDCALL; }
@@ -90,9 +108,10 @@ public:
     return S_OK;
   }
 
-  HRESULT STDMETHODCALLTYPE GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) final;
+  HRESULT STDMETHODCALLTYPE GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) final; // traced in .cpp
 
   HRESULT STDMETHODCALLTYPE LockRect(UINT Level, D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) final {
+    tex_trace("LockRect");
     if (Level >= levelCount_ || !pLockedRect) return D3DERR_INVALIDCALL;
     auto &mip = mips_[Level];
     pLockedRect->Pitch = mip.pitch;
@@ -314,7 +333,10 @@ public:
     return E_NOINTERFACE;
   }
 
-  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final {
+    if (!ppDevice) return D3DERR_INVALIDCALL;
+    return parent_->GetDevice(ppDevice);
+  }
   HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void *, DWORD, DWORD) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void *, DWORD *) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) final { return D3DERR_INVALIDCALL; }
@@ -356,6 +378,7 @@ private:
 
 // Deferred implementation — needs D3D9TextureSurface to be complete
 inline HRESULT STDMETHODCALLTYPE D3D9Texture2D::GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) {
+  tex_trace("GetSurfaceLevel");
   if (Level >= levelCount_ || !ppSurfaceLevel) return D3DERR_INVALIDCALL;
   *ppSurfaceLevel = ref(new D3D9TextureSurface(this, Level));
   return S_OK;
@@ -410,7 +433,12 @@ public:
   }
 
   // IDirect3DResource9
-  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final {
+    if (!ppDevice) return D3DERR_INVALIDCALL;
+    *ppDevice = static_cast<IDirect3DDevice9 *>(device_);
+    (*ppDevice)->AddRef();
+    return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void *, DWORD, DWORD) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void *, DWORD *) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) final { return D3DERR_INVALIDCALL; }
@@ -611,7 +639,10 @@ public:
     return E_NOINTERFACE;
   }
 
-  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **) final { return D3DERR_INVALIDCALL; }
+  HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9 **ppDevice) final {
+    if (!ppDevice) return D3DERR_INVALIDCALL;
+    return parent_->GetDevice(ppDevice);
+  }
   HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, const void *, DWORD, DWORD) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, void *, DWORD *) final { return D3DERR_INVALIDCALL; }
   HRESULT STDMETHODCALLTYPE FreePrivateData(REFGUID) final { return D3DERR_INVALIDCALL; }

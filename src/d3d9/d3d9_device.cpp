@@ -1,3 +1,4 @@
+#include <cstdarg>
 #include "d3d9_device.hpp"
 #include "d3d9_buffer.hpp"
 #include "d3d9_format.hpp"
@@ -19,6 +20,17 @@
 #include "wsi_platform.hpp"
 #include "wsi_monitor.hpp"
 #include "wsi_window.hpp"
+
+static void trace_file(const char* msg) {
+  HANDLE h = CreateFileA("C:\\windows\\temp\\d3d9_trace.log", FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD written;
+    WriteFile(h, msg, strlen(msg), &written, NULL);
+    WriteFile(h, "\r\n", 2, &written, NULL);
+    FlushFileBuffers(h);
+    CloseHandle(h);
+  }
+}
 
 namespace dxmt {
 
@@ -275,10 +287,12 @@ D3D9Device::D3D9Device(IDirect3D9 *pD3D9, HWND hFocusWindow, D3DPRESENT_PARAMETE
   if (cursor_scale_ < 1) cursor_scale_ = 1;
   if (cursor_scale_ > 8) cursor_scale_ = 8;
 
-  Logger::info("D3D9Device: created successfully");
+  Logger::info("D3D9Device: BUILD_V2_GETDEVICE_FIX created successfully");
+  trace_file("DEVICE CREATED");
 }
 
 D3D9Device::~D3D9Device() {
+  Logger::info("TRACE: destructor called");
   for (auto &[_, hCursor] : cursor_cache_)
     DestroyCursor(hCursor);
   if (native_view_)
@@ -433,6 +447,7 @@ HRESULT D3D9Device::CreateBackbuffer(UINT width, UINT height) {
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::QueryInterface(REFIID riid, void **ppvObj) {
+  Logger::err(str::format("TRACE: QueryInterface riid=", riid.Data1));
   if (!ppvObj) return E_POINTER;
   *ppvObj = nullptr;
   if (riid == __uuidof(IUnknown) || riid == __uuidof(IDirect3DDevice9)) {
@@ -453,7 +468,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetDirect3D(IDirect3D9 **ppD3D9) {
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::GetDeviceCaps(D3DCAPS9 *pCaps) {
-  Logger::info("D3D9: GetDeviceCaps");
+  Logger::info("TRACE: GetDeviceCaps called");
   return d3d9_->GetDeviceCaps(0, D3DDEVTYPE_HAL, pCaps);
 }
 
@@ -476,6 +491,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetCreationParameters(D3DDEVICE_CREATION_P
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
+  Logger::info("TRACE: Reset called");
   if (!pPresentationParameters) return D3DERR_INVALIDCALL;
 
   // Flush all pending GPU work before destroying resources
@@ -616,8 +632,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetRenderTarget(DWORD RenderTargetIndex, I
   return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE D3D9Device::BeginScene() { return S_OK; }
-HRESULT STDMETHODCALLTYPE D3D9Device::EndScene() { return S_OK; }
+HRESULT STDMETHODCALLTYPE D3D9Device::BeginScene() { trace_file("BeginScene"); return S_OK; }
+HRESULT STDMETHODCALLTYPE D3D9Device::EndScene() { Logger::info("TRACE: EndScene"); return S_OK; }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::Clear(
     DWORD Count, const D3DRECT *pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil) {
@@ -899,6 +915,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetTextureStageState(DWORD Stage, D3DTEXTU
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateTexture(
     UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DTexture9 **ppTexture, HANDLE *pSharedHandle) {
+  Logger::err(str::format("TRACE: CreateTexture ", Width, "x", Height, " lvl=", Levels, " usage=", (int)Usage, " fmt=", (int)Format, " pool=", (int)Pool));
   Logger::info(str::format("D3D9: CreateTexture ", Width, "x", Height,
       " lvl=", Levels, " usage=", Usage, " fmt=", (int)Format, " (", D3D9FormatName(Format), ")"));
   if (!ppTexture) return D3DERR_INVALIDCALL;
@@ -997,6 +1014,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateTexture(
   }
 
   *ppTexture = ref(tex2d);
+  trace_file("CreateTexture OK");
   return S_OK;
 }
 
@@ -1243,6 +1261,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateDepthStencilSurface(
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateVertexBuffer(
     UINT Length, DWORD Usage, DWORD FVF, D3DPOOL Pool,
     IDirect3DVertexBuffer9 **ppVertexBuffer, HANDLE *pSharedHandle) {
+  Logger::err(str::format("TRACE: CreateVertexBuffer len=", Length, " usage=", (int)Usage, " fvf=", (int)FVF, " pool=", (int)Pool));
   if (!ppVertexBuffer) return D3DERR_INVALIDCALL;
 
   auto buffer = Rc(new Buffer(Length, dxmt_device_->device()));
@@ -1261,6 +1280,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateVertexBuffer(
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateIndexBuffer(
     UINT Length, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DIndexBuffer9 **ppIndexBuffer, HANDLE *pSharedHandle) {
+  Logger::err(str::format("TRACE: CreateIndexBuffer len=", Length, " fmt=", (int)Format, " pool=", (int)Pool));
   if (!ppIndexBuffer) return D3DERR_INVALIDCALL;
   if (Format != D3DFMT_INDEX16 && Format != D3DFMT_INDEX32) return D3DERR_INVALIDCALL;
 
@@ -1318,6 +1338,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetFVF(DWORD *pFVF) {
 // Vertex declaration
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateVertexDeclaration(
     const D3DVERTEXELEMENT9 *pVertexElements, IDirect3DVertexDeclaration9 **ppDecl) {
+  Logger::info("TRACE: CreateVertexDeclaration");
   if (!pVertexElements || !ppDecl) return D3DERR_INVALIDCALL;
   *ppDecl = ref(new D3D9VertexDeclaration(pVertexElements));
   return S_OK;
@@ -1558,6 +1579,8 @@ static WMT::Reference<WMT::Function> CompileSm30VertexShaderWithLayout(
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateVertexShader(const DWORD *pFunction, IDirect3DVertexShader9 **ppShader) {
+  Logger::info("TRACE: CreateVertexShader");
+  trace_file("CreateVertexShader");
   if (!pFunction || !ppShader) return D3DERR_INVALIDCALL;
 
   // Scan for END token to determine SM30 bytecode size
@@ -1596,6 +1619,8 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetVertexShader(IDirect3DVertexShader9 **p
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Device::CreatePixelShader(const DWORD *pFunction, IDirect3DPixelShader9 **ppShader) {
+  Logger::info("TRACE: CreatePixelShader");
+  trace_file("CreatePixelShader");
   if (!pFunction || !ppShader) return D3DERR_INVALIDCALL;
 
   // Scan for END token
@@ -1746,6 +1771,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::SetStreamSource(
 
 // Queries
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateQuery(D3DQUERYTYPE Type, IDirect3DQuery9 **ppQuery) {
+  Logger::err(str::format("TRACE: CreateQuery type=", (int)Type, " ppQuery=", (void*)ppQuery));
   if (Type != D3DQUERYTYPE_EVENT && Type != D3DQUERYTYPE_OCCLUSION)
     return D3DERR_NOTAVAILABLE;
   if (!ppQuery) return S_OK; // Just checking support
@@ -2026,7 +2052,6 @@ D3D9CompiledPipeline *D3D9Device::CreatePSO() {
     pso_dirty_ = false;
     return cached_pso_;
   }
-
   WMTRenderPipelineInfo pipeline_info;
   WMT::InitializeRenderPipelineInfo(pipeline_info);
 
@@ -2053,8 +2078,8 @@ D3D9CompiledPipeline *D3D9Device::CreatePSO() {
   pipeline_info.rasterization_enabled = true;
   pipeline_info.raster_sample_count = 1;
   pipeline_info.input_primitive_topology = WMTPrimitiveTopologyClassUnspecified;
-  pipeline_info.immutable_vertex_buffers = (1 << 29) | (1 << 30);
-  pipeline_info.immutable_fragment_buffers = (1 << 29) | (1 << 30);
+  pipeline_info.immutable_vertex_buffers = 0;
+  pipeline_info.immutable_fragment_buffers = 0;
 
   // Blend state (applies to all active RTs)
   if (blendEnable) {
@@ -2217,7 +2242,9 @@ bool D3D9Device::EnsureRenderEncoder() {
     InvalidateCurrentPass();
 
   if (encoder_state_ == EncoderState::Idle) {
-    auto argbuf_size_owner = std::make_unique<uint64_t>(0);
+    // Pre-reserve space for the fixed VS/PS struct region at offset 0
+    constexpr uint64_t FIXED_REGION = 3 * 8 + 18 * 8; // VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE
+    auto argbuf_size_owner = std::make_unique<uint64_t>(FIXED_REGION);
     argbuf_size_ptr_ = argbuf_size_owner.get();
 
     auto &queue = dxmt_device_->queue();
@@ -2459,7 +2486,8 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   uint16_t ps_const_count = ps_needs_special_regs ? 256 : ps_const_count_base;
   uint64_t ps_const_buf_size = ps_const_count * 4 * sizeof(float);
   uint64_t vb_region_size = num_vb_slots * VB_ENTRY_SIZE;
-  constexpr uint64_t VS_ARGBUF_STRUCT_SIZE = 4 * 8;
+  // VS struct: {vs_constants_ptr, vs_const_buf_size, half_pixel_offset} = 3 fields
+  constexpr uint64_t VS_ARGBUF_STRUCT_SIZE = 3 * 8;
   constexpr uint64_t PS_ARGBUF_STRUCT_SIZE = 18 * 8;
 
   // Update FF constants before version check
@@ -2565,10 +2593,31 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   // Resolve rasterizer state (always recompute — must re-emit after pass reopen)
   WMTCullMode cull_mode = ConvertCullMode(render_states_[D3DRS_CULLMODE]);
 
-  // Allocate argbuf — only reserve space for state that needs writing
-  uint64_t argbuf_base = PreAllocateArgumentBuffer(draw_argbuf_size, 16);
+  // VS/PS structs are always at fixed offsets 0 and VS_ARGBUF_STRUCT_SIZE.
+  // Only VB entries and constants get new offsets per draw.
+  // This avoids changing buffer[29]/[30] offsets between draws, which doesn't
+  // work correctly with Metal argument buffer indirection.
+  constexpr uint64_t FIXED_REGION = VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE;
+  uint64_t vs_struct_off = 0;
+  uint64_t ps_struct_off = VS_ARGBUF_STRUCT_SIZE;
+
+  // Allocate space for variable-size data (VB entries + constants) AFTER the fixed region
+  uint64_t var_alloc_size = vb_alloc_size + vs_alloc_size + ps_alloc_size;
+  uint64_t var_base;
+  if (var_alloc_size > 0) {
+    var_base = PreAllocateArgumentBuffer(var_alloc_size, 16);
+    // Ensure variable data starts after the fixed region
+    if (var_base < FIXED_REGION) {
+      // First draw: skip past fixed region
+      (void)PreAllocateArgumentBuffer(FIXED_REGION - var_base, 1);
+      var_base = PreAllocateArgumentBuffer(var_alloc_size, 16);
+    }
+  } else {
+    var_base = FIXED_REGION; // dummy
+  }
+
   uint64_t vb_off;
-  uint64_t next_off = argbuf_base;
+  uint64_t next_off = var_base;
   if (vb_reuse) {
     vb_off = last_vb_argbuf_off_;
   } else {
@@ -2589,8 +2638,6 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     ps_const_off_local = next_off;
     next_off += ps_const_buf_size;
   }
-  uint64_t vs_struct_off = next_off;
-  uint64_t ps_struct_off = vs_struct_off + VS_ARGBUF_STRUCT_SIZE;
 
   // Copy constants to command heap — skip when version unchanged (reuse argbuf offset)
   void *vs_const_data = nullptr;
@@ -2706,10 +2753,10 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     if (ps_const_data)
       memcpy(ctx.getMappedArgumentBuffer<char>(ps_const_off_local), ps_const_data, ps_const_buf_size);
 
+    // VS argument struct at fixed offset 0 (never changes between draws)
     auto *vs_s = ctx.getMappedArgumentBuffer<uint64_t>(vs_struct_off);
-    vs_s[0] = ctx.getArgumentBufferGPUAddress(vb_off);
-    vs_s[1] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
-    vs_s[2] = (uint64_t)vs_const_count;
+    vs_s[0] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
+    vs_s[1] = (uint64_t)vs_const_count;
     // Pack half-pixel offset as two floats in a uint64: float2(1/w, 1/h)
     {
       float hpx = 1.0f / (float)vp.Width;
@@ -2717,11 +2764,12 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
       uint32_t hpx_bits, hpy_bits;
       memcpy(&hpx_bits, &hpx, 4);
       memcpy(&hpy_bits, &hpy, 4);
-      vs_s[3] = (uint64_t)hpx_bits | ((uint64_t)hpy_bits << 32);
+      vs_s[2] = (uint64_t)hpx_bits | ((uint64_t)hpy_bits << 32);
     }
+    // VB entries at index 16 (direct buffer, supports offset changes between draws)
     { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
       c.type = WMTRenderCommandSetVertexBufferOffset;
-      c.offset = ctx.getFinalArgumentBufferOffset(vs_struct_off); c.index = 29; }
+      c.offset = ctx.getFinalArgumentBufferOffset(vb_off); c.index = 16; }
   });
 
   // Emit VB entries — skip entirely when fingerprint unchanged (same argbuf offset reused)
@@ -3245,6 +3293,7 @@ void D3D9Device::UpdateStatistics(const FrameStatisticsContainer &statistics, ui
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateOffscreenPlainSurface(
     UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool,
     IDirect3DSurface9 **ppSurface, HANDLE *pSharedHandle) {
+  Logger::err(str::format("TRACE: CreateOffscreenPlainSurface ", Width, "x", Height, " fmt=", (int)Format, " pool=", (int)Pool));
   if (!ppSurface) return D3DERR_INVALIDCALL;
   if (Pool != D3DPOOL_SYSTEMMEM) return D3DERR_INVALIDCALL;
 
@@ -3590,6 +3639,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::CreateRenderTarget(
     UINT Width, UINT Height, D3DFORMAT Format,
     D3DMULTISAMPLE_TYPE MultiSample, DWORD MultisampleQuality,
     BOOL Lockable, IDirect3DSurface9 **ppSurface, HANDLE *pSharedHandle) {
+  Logger::err(str::format("TRACE: CreateRenderTarget ", Width, "x", Height, " fmt=", (int)Format));
   if (!ppSurface) return D3DERR_INVALIDCALL;
 
   auto mtlFormat = ConvertD3D9Format(Format);
@@ -3790,6 +3840,7 @@ HRESULT STDMETHODCALLTYPE D3D9Device::GetStreamSource(
 
 // State blocks
 HRESULT STDMETHODCALLTYPE D3D9Device::CreateStateBlock(D3DSTATEBLOCKTYPE Type, IDirect3DStateBlock9 **ppSB) {
+  Logger::err(str::format("TRACE: CreateStateBlock type=", (int)Type));
   if (!ppSB) return D3DERR_INVALIDCALL;
 
   Logger::debug(str::format("D3D9: CreateStateBlock type=", (int)Type));
