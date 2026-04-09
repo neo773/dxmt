@@ -264,13 +264,13 @@ static void compileFFVertexShader(
     });
   }
 
-  // Build VS argument buffer struct (bindless: replaces fixed slots 16, 17)
+  // Build VS argument buffer struct: {vs_constants, vs_const_buf_size, half_pixel_offset}
+  // VB entries are at direct buffer index 16 (matching SM3 VS layout from multi-draw fix)
   ArgumentBufferBuilder vs_argbuf;
-  uint32_t vs_ab_vbuf = vs_argbuf.DefineBuffer(
-    "vertex_buffers", AddressSpace::constant, MemoryAccess::read, msl_uint);
   uint32_t vs_ab_cbuf = vs_argbuf.DefineBuffer(
     "vs_constants", AddressSpace::constant, MemoryAccess::read, msl_float4);
   (void)vs_argbuf.DefineInteger64("vs_const_buf_size");
+  (void)vs_argbuf.DefineInteger64("half_pixel_offset");
 
   auto [vs_argbuf_type, vs_argbuf_md] = vs_argbuf.Build(context, module.getDataLayout());
   uint32_t vs_argbuf_idx = func_sig.DefineInput(ArgumentBindingIndirectBuffer{
@@ -281,6 +281,16 @@ static void compileFFVertexShader(
     .struct_type = vs_argbuf_type,
     .struct_type_info = vs_argbuf_md,
     .arg_name = "vs_argument_buffer",
+  });
+
+  // VB entries as a direct buffer at index 16 (like SM3 VS does)
+  uint32_t vb_direct_idx = func_sig.DefineInput(ArgumentBindingBuffer{
+    .location_index = 16,
+    .array_size = 1,
+    .memory_access = MemoryAccess::read,
+    .address_space = AddressSpace::constant,
+    .type = msl_uint,
+    .arg_name = "vertex_buffer_table",
   });
 
   uint32_t vertex_id_idx = func_sig.DefineInput(InputVertexID{});
@@ -302,11 +312,10 @@ static void compileFFVertexShader(
 
   auto *vertex_id = function->getArg(vertex_id_idx);
 
-  // Load resources from VS argument buffer struct
+  // Load resources from VS argument buffer struct + direct buffer
   auto *vs_argbuf_ptr = function->getArg(vs_argbuf_idx);
-  auto *vbuf_table_raw = builder.CreateLoad(
-    vs_argbuf_type->getElementType(vs_ab_vbuf),
-    builder.CreateStructGEP(vs_argbuf_type, vs_argbuf_ptr, vs_ab_vbuf));
+  // VB entries from direct buffer at index 16
+  auto *vbuf_table_raw = function->getArg(vb_direct_idx);
   auto *vbEntryTy = types._dxmt_vertex_buffer_entry;
   auto *vbuf_table = builder.CreateBitCast(
     vbuf_table_raw,

@@ -183,10 +183,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, int)
         return ((uint32_t *)((uint8_t *)lockedRect.pBits + y * lockedRect.Pitch))[x];
     };
 
-    uint32_t tl = getPixel(0, 0);
-    uint32_t tr = getPixel(WIDTH - 1, 0);
-    uint32_t bl = getPixel(0, HEIGHT - 1);
-    uint32_t br = getPixel(WIDTH - 1, HEIGHT - 1);
+    // Sample 2 pixels inside each quadrant (avoid edge pixels affected by half-pixel offset)
+    uint32_t tl = getPixel(2, 2);
+    uint32_t tr = getPixel(WIDTH - 3, 2);
+    uint32_t bl = getPixel(2, HEIGHT - 3);
+    uint32_t br = getPixel(WIDTH - 3, HEIGHT - 3);
 
     bool pass = true;
     auto check = [&](const char *name, uint32_t got, uint32_t expected) {
