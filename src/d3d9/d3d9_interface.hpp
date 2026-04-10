@@ -9,6 +9,10 @@ class D3D9Interface final : public ComObjectWithInitialRef<IDirect3D9> {
 
 public:
   D3D9Interface();
+  ~D3D9Interface();
+
+  ULONG STDMETHODCALLTYPE AddRef() final;
+  ULONG STDMETHODCALLTYPE Release() final;
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObj) final;
 

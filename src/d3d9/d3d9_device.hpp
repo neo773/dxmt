@@ -432,10 +432,12 @@ private:
   uint64_t last_tex_fingerprint_ = ~0ULL;
   uint64_t last_ps_tex_argbuf_off_ = 0;
   uint64_t last_vs_const_version_ = ~0ULL;
-  uint64_t last_vs_const_argbuf_off_ = 0;
+  uint64_t last_vs_const_gpu_addr_ = 0;
+  WMT::Buffer last_vs_const_mtl_buf_;
   uint16_t last_vs_const_count_ = 0;
   uint64_t last_ps_const_version_ = ~0ULL;
-  uint64_t last_ps_const_argbuf_off_ = 0;
+  uint64_t last_ps_const_gpu_addr_ = 0;
+  WMT::Buffer last_ps_const_mtl_buf_;
   uint16_t last_ps_const_count_ = 0;
   uint64_t last_vb_fingerprint_ = ~0ULL;
   uint64_t last_vb_argbuf_off_ = 0;

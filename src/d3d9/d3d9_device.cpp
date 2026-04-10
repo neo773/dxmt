@@ -2315,10 +2315,12 @@ bool D3D9Device::EnsureRenderEncoder() {
     last_tex_fingerprint_ = ~0ULL;
     last_ps_tex_argbuf_off_ = 0;
     last_vs_const_version_ = ~0ULL;
-    last_vs_const_argbuf_off_ = 0;
+    last_vs_const_gpu_addr_ = 0;
+    last_vs_const_mtl_buf_ = {};
     last_vs_const_count_ = 0;
     last_ps_const_version_ = ~0ULL;
-    last_ps_const_argbuf_off_ = 0;
+    last_ps_const_gpu_addr_ = 0;
+    last_ps_const_mtl_buf_ = {};
     last_ps_const_count_ = 0;
     last_vb_fingerprint_ = ~0ULL;
     last_vb_argbuf_off_ = 0;
@@ -2515,11 +2517,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
                    && (num_vb_slots == last_vb_num_slots_);
 
   // Only allocate argbuf space for state that needs to be written
-  uint64_t vs_alloc_size = vs_const_reuse ? 0 : vs_const_buf_size;
-  uint64_t ps_alloc_size = ps_const_reuse ? 0 : ps_const_buf_size;
+  // Constants go in the ring allocator (direct write), not the argument buffer
   uint64_t vb_alloc_size = vb_reuse ? 0 : vb_region_size;
-  uint64_t draw_argbuf_size = vb_alloc_size + vs_alloc_size + ps_alloc_size
-                             + VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE;
+  uint64_t draw_argbuf_size = vb_alloc_size + VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE;
 
   // 6. Check argbuf overflow → close and reopen pass
   if (*argbuf_size_ptr_ + draw_argbuf_size > kCommandChunkGPUHeapSize) {
@@ -2603,8 +2603,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
 
   uint64_t vs_struct_alloc = vs_needs_rebind ? VS_ARGBUF_STRUCT_SIZE : 0;
   uint64_t ps_struct_alloc = ps_needs_rebind ? PS_ARGBUF_STRUCT_SIZE : 0;
-  uint64_t draw_alloc_size = vb_alloc_size + vs_alloc_size + ps_alloc_size
-                            + vs_struct_alloc + ps_struct_alloc;
+  uint64_t draw_alloc_size = vb_alloc_size + vs_struct_alloc + ps_struct_alloc;
 
   uint64_t draw_base = draw_alloc_size > 0 ? PreAllocateArgumentBuffer(draw_alloc_size, 16) : 0;
   uint64_t next_off = draw_base;
@@ -2616,63 +2615,63 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     vb_off = next_off;
     next_off += vb_region_size;
   }
-  uint64_t vs_const_off_local;
-  if (vs_const_reuse) {
-    vs_const_off_local = last_vs_const_argbuf_off_;
-  } else {
-    vs_const_off_local = next_off;
-    next_off += vs_const_buf_size;
-  }
-  uint64_t ps_const_off_local;
-  if (ps_const_reuse) {
-    ps_const_off_local = last_ps_const_argbuf_off_;
-  } else {
-    ps_const_off_local = next_off;
-    next_off += ps_const_buf_size;
-  }
   uint64_t vs_struct_off = vs_needs_rebind ? next_off : 0;
   if (vs_needs_rebind) next_off += VS_ARGBUF_STRUCT_SIZE;
   uint64_t ps_struct_off = ps_needs_rebind ? next_off : 0;
   if (ps_needs_rebind) next_off += PS_ARGBUF_STRUCT_SIZE;
 
-  // Copy constants to command heap — skip when version unchanged (reuse argbuf offset)
-  void *vs_const_data = nullptr;
-  void *ps_const_data = nullptr;
-  if (!vs_const_reuse || !ps_const_reuse) {
-    uint64_t alloc_size = vs_alloc_size + ps_alloc_size;
-    void *const_base = alloc_size ? queue.AllocateCommandData(alloc_size, 16) : nullptr;
-    char *p = (char *)const_base;
-    if (!vs_const_reuse) {
-      vs_const_data = p;
-      memcpy(vs_const_data, current_vs_ ? (const void *)vsConstants_ : (const void *)cached_ff_vs_, vs_const_buf_size);
-      p += vs_const_buf_size;
-    }
-    if (!ps_const_reuse) {
-      ps_const_data = p;
-      memset(ps_const_data, 0, ps_const_buf_size);
-      if (current_ps_) {
-        uint16_t psc = (uint16_t)std::min(current_ps_->maxConstantReg(), 256u);
-        memcpy(ps_const_data, psConstants_, psc * 4 * sizeof(float));
-        float *ps_out = (float *)ps_const_data;
-        if (render_states_[D3DRS_ALPHATESTENABLE] && render_states_[D3DRS_ALPHAFUNC] != D3DCMP_ALWAYS)
-          ps_out[255 * 4 + 0] = (float)(render_states_[D3DRS_ALPHAREF] & 0xFF) / 255.0f;
-        if (render_states_[D3DRS_FOGENABLE]) {
-          DWORD fc = render_states_[D3DRS_FOGCOLOR];
-          ps_out[255 * 4 + 1] = (float)((fc >> 16) & 0xFF) / 255.0f;
-          ps_out[255 * 4 + 2] = (float)((fc >> 8) & 0xFF) / 255.0f;
-          ps_out[255 * 4 + 3] = (float)(fc & 0xFF) / 255.0f;
-          float fogStart, fogEnd, fogDensity;
-          memcpy(&fogStart, &render_states_[D3DRS_FOGSTART], sizeof(float));
-          memcpy(&fogEnd, &render_states_[D3DRS_FOGEND], sizeof(float));
-          memcpy(&fogDensity, &render_states_[D3DRS_FOGDENSITY], sizeof(float));
-          ps_out[254 * 4 + 0] = fogStart;
-          ps_out[254 * 4 + 1] = fogEnd;
-          ps_out[254 * 4 + 2] = fogDensity;
-        }
-      } else {
-        memcpy(ps_const_data, cached_ff_ps_, 3 * 4 * sizeof(float));
+  // Write constants directly to ring allocator (GPU-visible memory) — ONE copy,
+  // eliminates AllocateCommandData staging + emitcc memcpy (was 2 copies)
+  auto &ring = GetDynamicBufferRing();
+  uint64_t vs_const_gpu_addr;
+  WMT::Buffer vs_const_mtl_buf;
+  if (vs_const_reuse) {
+    vs_const_gpu_addr = last_vs_const_gpu_addr_;
+    vs_const_mtl_buf = last_vs_const_mtl_buf_;
+  } else {
+    auto [vs_block, vs_off] = ring.allocate(
+        queue.CurrentSeqId(), queue.CoherentSeqId(), vs_const_buf_size, 16);
+    char *vs_mapped = static_cast<char *>(vs_block.mapped_address) + vs_off;
+    memcpy(vs_mapped, current_vs_ ? (const void *)vsConstants_ : (const void *)cached_ff_vs_,
+           vs_const_buf_size);
+    vs_const_gpu_addr = vs_block.gpu_address + vs_off;
+    vs_const_mtl_buf = vs_block.buffer;
+  }
+
+  uint64_t ps_const_gpu_addr;
+  WMT::Buffer ps_const_mtl_buf;
+  if (ps_const_reuse) {
+    ps_const_gpu_addr = last_ps_const_gpu_addr_;
+    ps_const_mtl_buf = last_ps_const_mtl_buf_;
+  } else {
+    auto [ps_block, ps_off] = ring.allocate(
+        queue.CurrentSeqId(), queue.CoherentSeqId(), ps_const_buf_size, 16);
+    char *ps_mapped = static_cast<char *>(ps_block.mapped_address) + ps_off;
+    memset(ps_mapped, 0, ps_const_buf_size);
+    if (current_ps_) {
+      uint16_t psc = (uint16_t)std::min(current_ps_->maxConstantReg(), 256u);
+      memcpy(ps_mapped, psConstants_, psc * 4 * sizeof(float));
+      float *ps_out = (float *)ps_mapped;
+      if (render_states_[D3DRS_ALPHATESTENABLE] && render_states_[D3DRS_ALPHAFUNC] != D3DCMP_ALWAYS)
+        ps_out[255 * 4 + 0] = (float)(render_states_[D3DRS_ALPHAREF] & 0xFF) / 255.0f;
+      if (render_states_[D3DRS_FOGENABLE]) {
+        DWORD fc = render_states_[D3DRS_FOGCOLOR];
+        ps_out[255 * 4 + 1] = (float)((fc >> 16) & 0xFF) / 255.0f;
+        ps_out[255 * 4 + 2] = (float)((fc >> 8) & 0xFF) / 255.0f;
+        ps_out[255 * 4 + 3] = (float)(fc & 0xFF) / 255.0f;
+        float fogStart, fogEnd, fogDensity;
+        memcpy(&fogStart, &render_states_[D3DRS_FOGSTART], sizeof(float));
+        memcpy(&fogEnd, &render_states_[D3DRS_FOGEND], sizeof(float));
+        memcpy(&fogDensity, &render_states_[D3DRS_FOGDENSITY], sizeof(float));
+        ps_out[254 * 4 + 0] = fogStart;
+        ps_out[254 * 4 + 1] = fogEnd;
+        ps_out[254 * 4 + 2] = fogDensity;
       }
+    } else {
+      memcpy(ps_mapped, cached_ff_ps_, 3 * 4 * sizeof(float));
     }
+    ps_const_gpu_addr = ps_block.gpu_address + ps_off;
+    ps_const_mtl_buf = ps_block.buffer;
   }
 
   // Capture texture state (allocation captured at API time to avoid encoding-thread race)
@@ -2770,16 +2769,12 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
                            (uint64_t)(scissor.bottom > top ? scissor.bottom - top : 0)};
     }
 
-    // Copy constants to argument buffer (only changed ones)
-    if (vs_const_data)
-      memcpy(ctx.getMappedArgumentBuffer<char>(vs_const_off_local), vs_const_data, vs_const_buf_size);
-    if (ps_const_data)
-      memcpy(ctx.getMappedArgumentBuffer<char>(ps_const_off_local), ps_const_data, ps_const_buf_size);
+    // Constants already written to ring buffer on API thread — no copy needed here
 
     // VS struct + buffer 29 re-bind (only when VS state changed)
     if (vs_needs_rebind) {
       auto *vs_s = ctx.getMappedArgumentBuffer<uint64_t>(vs_struct_off);
-      vs_s[0] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
+      vs_s[0] = vs_const_gpu_addr; // GPU address in ring buffer (direct, no argbuf indirection)
       vs_s[1] = (uint64_t)vs_const_count;
       { float hpx = 1.0f / (float)vp.Width, hpy = 1.0f / (float)vp.Height;
         uint32_t hpx_bits, hpy_bits;
@@ -2792,6 +2787,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
       { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
         c.type = WMTRenderCommandSetVertexBufferOffset;
         c.offset = ctx.getFinalArgumentBufferOffset(vb_off); c.index = 16; }
+      // Make VS constant ring buffer resident
+      ctx.makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(
+          vs_const_mtl_buf, DXMT_RESOURCE_RESIDENCY_VERTEX_READ);
     }
 
     // VB entries (only when VB state changed)
@@ -2813,7 +2811,7 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     // PS struct + buffer 30 re-bind (only when PS state changed)
     if (ps_needs_rebind) {
       auto *ps_s = ctx.getMappedArgumentBuffer<uint64_t>(ps_struct_off);
-      ps_s[0] = ctx.getArgumentBufferGPUAddress(ps_const_off_local);
+      ps_s[0] = ps_const_gpu_addr; // GPU address in ring buffer (direct, no argbuf indirection)
       ps_s[1] = (uint64_t)ps_const_count;
       if (!tex_full_rebind) {
         memcpy(&ps_s[2], ctx.getMappedArgumentBuffer<uint64_t>(prev_ps_tex_off), 16 * sizeof(uint64_t));
@@ -2825,6 +2823,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
         c.type = WMTRenderCommandSetFragmentBuffer;
         c.buffer = ctx.getFinalArgumentBuffer().handle;
         c.offset = ctx.getFinalArgumentBufferOffset(ps_struct_off); c.index = 30; }
+      // Make PS constant ring buffer resident
+      ctx.makeResident<PipelineStage::Pixel, PipelineKind::Ordinary>(
+          ps_const_mtl_buf, DXMT_RESOURCE_RESIDENCY_FRAGMENT_READ);
     }
   });
 
@@ -2857,10 +2858,12 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   last_vb_argbuf_off_ = vb_off;
   last_vb_num_slots_ = num_vb_slots;
   last_vs_const_version_ = vs_ver;
-  last_vs_const_argbuf_off_ = vs_const_off_local;
+  last_vs_const_gpu_addr_ = vs_const_gpu_addr;
+  last_vs_const_mtl_buf_ = vs_const_mtl_buf;
   last_vs_const_count_ = vs_const_count;
   last_ps_const_version_ = ps_ver;
-  last_ps_const_argbuf_off_ = ps_const_off_local;
+  last_ps_const_gpu_addr_ = ps_const_gpu_addr;
+  last_ps_const_mtl_buf_ = ps_const_mtl_buf;
   last_ps_const_count_ = ps_const_count;
 
 #ifdef DXMT_PERF

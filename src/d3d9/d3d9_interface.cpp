@@ -5,10 +5,57 @@
 #include "log/log.hpp"
 #include "wsi_monitor.hpp"
 
+#include <algorithm>
+#include <cstdio>
+#include <vector>
+
 namespace dxmt {
 
+// Guaranteed-flush file logging (survives crashes)
+static FILE *rawlog_file() {
+  static FILE *f = nullptr;
+  if (!f) { f = fopen("C:\\dxmt_raw.log", "a"); }
+  return f;
+}
+static void rawlog(const char *msg) {
+  FILE *f = rawlog_file();
+  if (f) { fputs(msg, f); fflush(f); }
+}
+static void rawlogf(const char *fmt, ...) {
+  FILE *f = rawlog_file();
+  if (f) {
+    va_list ap; va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fflush(f);
+  }
+}
+
 D3D9Interface::D3D9Interface() {
-  Logger::info("D3D9Interface created");
+  Logger::info("D3D9Interface CREATED");
+}
+
+D3D9Interface::~D3D9Interface() {
+  Logger::info("D3D9Interface DESTROYED");
+}
+
+ULONG STDMETHODCALLTYPE D3D9Interface::AddRef() {
+  ULONG r = m_refCount.fetch_add(1) + 1;
+  Logger::info(str::format("D3D9Interface::AddRef refcount=", r));
+  return r;
+}
+
+ULONG STDMETHODCALLTYPE D3D9Interface::Release() {
+  ULONG before = m_refCount.load();
+  if (before <= 1) {
+    // Singleton: never self-delete. The D3D9Interface is kept alive by g_d3d9_singleton.
+    Logger::info(str::format("D3D9Interface::Release CLAMPED refcount=", before));
+    return 1;
+  }
+  ULONG r = m_refCount.fetch_sub(1) - 1;
+  Logger::info(str::format("D3D9Interface::Release refcount ", before, " -> ", r));
+  // Never delete — singleton
+  return r;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::QueryInterface(REFIID riid, void **ppvObj) {
@@ -30,11 +77,14 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::RegisterSoftwareDevice(void *) {
 }
 
 UINT STDMETHODCALLTYPE D3D9Interface::GetAdapterCount() {
+  rawlog("GetAdapterCount -> 1\n");
   return 1;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::GetAdapterIdentifier(
     UINT Adapter, DWORD Flags, D3DADAPTER_IDENTIFIER9 *pIdentifier) {
+  Logger::info(str::format("GetAdapterIdentifier adapter=", Adapter, " flags=0x", std::hex, Flags));
+  rawlogf("GetAdapterIdentifier adapter=%u flags=0x%lx\n", Adapter, (unsigned long)Flags);
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
   if (!pIdentifier)
@@ -44,18 +94,35 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::GetAdapterIdentifier(
   strcpy(pIdentifier->Driver, "dxmt");
 
   auto devices = WMT::CopyAllDevices();
+  Logger::info(str::format("GetAdapterIdentifier: CopyAllDevices returned ", devices.count(), " devices"));
+  if (devices.count() == 0) {
+    Logger::err("GetAdapterIdentifier: No Metal devices found!");
+    return D3DERR_NOTAVAILABLE;
+  }
   auto device = devices.object(0);
   auto name = device.name().getUTF8String();
   strncpy(pIdentifier->Description, name.c_str(), sizeof(pIdentifier->Description) - 1);
+  Logger::info(str::format("GetAdapterIdentifier: device='", name.c_str(), "'"));
 
   pIdentifier->VendorId = 0x8086; // Intel (GTA IV requires Intel/AMD, crashes with unknown vendors)
   pIdentifier->DeviceId = (DWORD)(device.registryID() & 0xFFFF);
 
-  char buf[256];
-  snprintf(buf, sizeof(buf), "D3D9 Adapter: %s vendor=0x%04lX device=0x%04lX registryID=0x%llX",
-           name.c_str(), (unsigned long)pIdentifier->VendorId, (unsigned long)pIdentifier->DeviceId,
-           (unsigned long long)device.registryID());
-  Logger::info(buf);
+  // Fill in realistic values that games may rely on
+  pIdentifier->DriverVersion.QuadPart = INT64_MAX; // DXVK pattern: report max version
+  pIdentifier->WHQLLevel = 1; // "WHQL certified" — some games require this
+
+  // Generate a stable DeviceIdentifier GUID from the Metal registryID
+  // Games may use this as a cache key or device identifier
+  uint64_t regId = device.registryID();
+  pIdentifier->DeviceIdentifier.Data1 = 0xD3D9D3D9; // recognizable prefix
+  pIdentifier->DeviceIdentifier.Data2 = (WORD)(regId & 0xFFFF);
+  pIdentifier->DeviceIdentifier.Data3 = (WORD)((regId >> 16) & 0xFFFF);
+  memcpy(pIdentifier->DeviceIdentifier.Data4, "DXMT_GPU", 8);
+
+  Logger::info(str::format("GetAdapterIdentifier -> OK vendor=0x", std::hex, pIdentifier->VendorId,
+               " device=0x", pIdentifier->DeviceId, " regId=", regId));
+  rawlogf("GetAdapterIdentifier -> OK vendor=0x%04lx device=0x%04lx\n",
+           (unsigned long)pIdentifier->VendorId, (unsigned long)pIdentifier->DeviceId);
   return S_OK;
 }
 
@@ -73,39 +140,74 @@ static uint32_t getFormatBpp(D3DFORMAT Format) {
   }
 }
 
+// Deduplicated mode list: macOS reports 100+ modes with HiDPI variants and
+// unusual refresh rates. Games expect ~20-30 modes with standard resolutions.
+// We keep one entry per unique (width, height) — the highest refresh rate.
+struct DeduplicatedMode {
+  UINT width, height, refreshRate;
+};
+
+static std::vector<DeduplicatedMode> buildDeduplicatedModes(uint32_t bpp) {
+  HMONITOR monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+  wsi::WsiMode wsiMode;
+
+  // Collect all modes, dedup by (width, height) keeping max refresh rate
+  std::vector<DeduplicatedMode> modes;
+  for (uint32_t i = 0; wsi::getDisplayMode(monitor, i, &wsiMode); i++) {
+    if (wsiMode.bitsPerPixel != bpp)
+      continue;
+    UINT rate = (wsiMode.refreshRate.denominator != 0)
+        ? wsiMode.refreshRate.numerator / wsiMode.refreshRate.denominator
+        : 60;
+    if (rate == 0) rate = 60;
+    // Check if we already have this resolution
+    bool found = false;
+    for (auto &m : modes) {
+      if (m.width == wsiMode.width && m.height == wsiMode.height) {
+        if (rate > m.refreshRate)
+          m.refreshRate = rate;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      modes.push_back({wsiMode.width, wsiMode.height, rate});
+    }
+  }
+  // Sort by resolution (width * height ascending, then width ascending)
+  std::sort(modes.begin(), modes.end(), [](const DeduplicatedMode &a, const DeduplicatedMode &b) {
+    uint64_t aPixels = (uint64_t)a.width * a.height;
+    uint64_t bPixels = (uint64_t)b.width * b.height;
+    if (aPixels != bPixels) return aPixels < bPixels;
+    return a.width < b.width;
+  });
+  return modes;
+}
+
 static UINT enumerateMatchingModes(D3DFORMAT Format, UINT targetIndex, D3DDISPLAYMODE *pOut) {
   uint32_t bpp = getFormatBpp(Format);
   if (bpp == 0)
     return 0;
 
-  HMONITOR monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
-  wsi::WsiMode wsiMode;
-  UINT matchCount = 0;
+  auto modes = buildDeduplicatedModes(bpp);
+  UINT count = (UINT)modes.size();
 
-  for (uint32_t i = 0; wsi::getDisplayMode(monitor, i, &wsiMode); i++) {
-    if (wsiMode.bitsPerPixel != bpp)
-      continue;
-
-    if (pOut && matchCount == targetIndex) {
-      pOut->Width = wsiMode.width;
-      pOut->Height = wsiMode.height;
-      pOut->RefreshRate = (wsiMode.refreshRate.denominator != 0)
-          ? wsiMode.refreshRate.numerator / wsiMode.refreshRate.denominator
-          : 60;
-      pOut->Format = Format;
-      return matchCount + 1;
-    }
-
-    matchCount++;
+  if (pOut && targetIndex < count) {
+    pOut->Width = modes[targetIndex].width;
+    pOut->Height = modes[targetIndex].height;
+    pOut->RefreshRate = modes[targetIndex].refreshRate;
+    pOut->Format = Format;
   }
 
-  return matchCount;
+  return count;
 }
 
 UINT STDMETHODCALLTYPE D3D9Interface::GetAdapterModeCount(UINT Adapter, D3DFORMAT Format) {
   if (Adapter != 0)
     return 0;
-  return enumerateMatchingModes(Format, UINT_MAX, nullptr);
+  UINT count = enumerateMatchingModes(Format, UINT_MAX, nullptr);
+  rawlogf("GetAdapterModeCount fmt=%d -> %u\n", (int)Format, count);
+  return count;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::EnumAdapterModes(
@@ -114,13 +216,18 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::EnumAdapterModes(
     return D3DERR_INVALIDCALL;
 
   UINT count = enumerateMatchingModes(Format, Mode, pMode);
-  if (Mode >= count)
+  if (Mode >= count) {
+    rawlogf("EnumAdapterModes fmt=%d mode=%u -> INVALIDCALL (count=%u)\n", (int)Format, Mode, count);
     return D3DERR_INVALIDCALL;
+  }
 
+  rawlogf("EnumAdapterModes fmt=%d mode=%u -> %ux%u@%u\n",
+           (int)Format, Mode, pMode->Width, pMode->Height, pMode->RefreshRate);
   return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::GetAdapterDisplayMode(UINT Adapter, D3DDISPLAYMODE *pMode) {
+  rawlog("GetAdapterDisplayMode\n");
   if (Adapter != 0 || !pMode)
     return D3DERR_INVALIDCALL;
 
@@ -142,22 +249,28 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::GetAdapterDisplayMode(UINT Adapter, D3D
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceType(
-    UINT Adapter, D3DDEVTYPE, D3DFORMAT, D3DFORMAT, BOOL) {
+    UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT AdapterFormat, D3DFORMAT BackBufferFormat, BOOL Windowed) {
+  Logger::info(str::format("CheckDeviceType devtype=", (int)DevType, " afmt=", (int)AdapterFormat,
+               " bbfmt=", (int)BackBufferFormat, " win=", Windowed));
+  rawlogf("CheckDeviceType adapter=%u devtype=%d afmt=%d bbfmt=%d win=%d\n",
+           Adapter, (int)DevType, (int)AdapterFormat, (int)BackBufferFormat, Windowed);
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
+  // Only support HAL (hardware) device type — REF/SW rasterizers don't exist
+  if (DevType != D3DDEVTYPE_HAL)
+    return D3DERR_NOTAVAILABLE;
   return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormat(
-    UINT Adapter, D3DDEVTYPE, D3DFORMAT, DWORD Usage, D3DRESOURCETYPE RType, D3DFORMAT CheckFormat) {
-  Logger::info(str::format("D3D9: CheckDeviceFormat fmt=", (int)CheckFormat,
-      " usage=", Usage, " rtype=", (int)RType));
+    UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT AdapterFormat, DWORD Usage, D3DRESOURCETYPE RType, D3DFORMAT CheckFormat) {
+  Logger::info(str::format("CheckDeviceFormat fmt=", (int)CheckFormat, " usage=0x", std::hex, Usage, " rtype=", std::dec, (int)RType));
+  rawlogf("CheckDeviceFormat fmt=%d usage=0x%lx rtype=%d\n", (int)CheckFormat, (unsigned long)Usage, (int)RType);
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
 
-  // Reject unsupported resource types
-  if (RType == D3DRTYPE_VOLUMETEXTURE)
-    return D3DERR_NOTAVAILABLE;
+  // Accept volume textures for capability queries even though we don't fully implement them.
+  // Games may take error paths if no volume texture formats are reported.
 
   // Reject proprietary depth-as-texture formats (DF24, DF16, INTZ, RAWZ, NULL)
   // GTA IV: disabling DF formats forces better mirror render path (DXVK precedent)
@@ -208,8 +321,7 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormat(
 
   // For regular textures/surfaces, check if format is mappable
   if (ConvertD3D9Format(CheckFormat) == WMTPixelFormatInvalid) {
-    Logger::warn(str::format("D3D9: CheckDeviceFormat rejected format=", (int)CheckFormat,
-                             " usage=", Usage, " rtype=", (int)RType));
+    rawlogf("  -> NOTAVAILABLE (unmapped format %d)\n", (int)CheckFormat);
     return D3DERR_NOTAVAILABLE;
   }
 
@@ -217,8 +329,9 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormat(
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceMultiSampleType(
-    UINT Adapter, D3DDEVTYPE, D3DFORMAT, BOOL, D3DMULTISAMPLE_TYPE MultiSampleType,
+    UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT SurfaceFormat, BOOL Windowed, D3DMULTISAMPLE_TYPE MultiSampleType,
     DWORD *pQualityLevels) {
+  rawlogf("CheckDeviceMultiSampleType fmt=%d ms=%d\n", (int)SurfaceFormat, (int)MultiSampleType);
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
   if (pQualityLevels)
@@ -229,14 +342,16 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceMultiSampleType(
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDepthStencilMatch(
-    UINT Adapter, D3DDEVTYPE, D3DFORMAT, D3DFORMAT, D3DFORMAT) {
+    UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT AdapterFormat, D3DFORMAT RenderTargetFormat, D3DFORMAT DepthStencilFormat) {
+  rawlogf("CheckDepthStencilMatch afmt=%d rt=%d ds=%d\n", (int)AdapterFormat, (int)RenderTargetFormat, (int)DepthStencilFormat);
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
   return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormatConversion(
-    UINT Adapter, D3DDEVTYPE, D3DFORMAT, D3DFORMAT) {
+    UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT SourceFormat, D3DFORMAT TargetFormat) {
+  rawlogf("CheckDeviceFormatConversion src=%d dst=%d\n", (int)SourceFormat, (int)TargetFormat);
   if (Adapter != 0)
     return D3DERR_INVALIDCALL;
   return S_OK;
@@ -244,6 +359,8 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CheckDeviceFormatConversion(
 
 HRESULT STDMETHODCALLTYPE D3D9Interface::GetDeviceCaps(
     UINT Adapter, D3DDEVTYPE DeviceType, D3DCAPS9 *pCaps) {
+  Logger::info("GetDeviceCaps called");
+  rawlog("GetDeviceCaps\n");
   if (Adapter != 0 || !pCaps)
     return D3DERR_INVALIDCALL;
 
@@ -259,7 +376,9 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::GetDeviceCaps(
   pCaps->DevCaps = D3DDEVCAPS_EXECUTESYSTEMMEMORY | D3DDEVCAPS_EXECUTEVIDEOMEMORY |
                    D3DDEVCAPS_TLVERTEXSYSTEMMEMORY | D3DDEVCAPS_TLVERTEXVIDEOMEMORY |
                    D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_HWTRANSFORMANDLIGHT |
-                   D3DDEVCAPS_PUREDEVICE;
+                   D3DDEVCAPS_PUREDEVICE | D3DDEVCAPS_DRAWPRIMITIVES2 |
+                   D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_CANRENDERAFTERFLIP |
+                   D3DDEVCAPS_TEXTUREVIDEOMEMORY;
 
   // -- Primitive/raster caps --
   pCaps->PrimitiveMiscCaps = D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW |
@@ -375,10 +494,13 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::GetDeviceCaps(
   pCaps->MaxStreamStride = 508;
   pCaps->NumSimultaneousRTs = 1; // only backbuffer RT functional
 
+  Logger::info("GetDeviceCaps -> OK");
+  rawlog("GetDeviceCaps -> OK\n");
   return S_OK;
 }
 
 HMONITOR STDMETHODCALLTYPE D3D9Interface::GetAdapterMonitor(UINT Adapter) {
+  rawlogf("GetAdapterMonitor adapter=%u\n", Adapter);
   return MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
 }
 
@@ -386,6 +508,9 @@ HRESULT STDMETHODCALLTYPE D3D9Interface::CreateDevice(
     UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow,
     DWORD BehaviorFlags, D3DPRESENT_PARAMETERS *pPresentationParameters,
     IDirect3DDevice9 **ppReturnedDeviceInterface) {
+  Logger::info(str::format("CreateDevice adapter=", Adapter, " devtype=", (int)DeviceType, " flags=0x", std::hex, BehaviorFlags));
+  rawlogf("CreateDevice adapter=%u devtype=%d hwnd=%p flags=0x%lx\n",
+           Adapter, (int)DeviceType, (void*)hFocusWindow, (unsigned long)BehaviorFlags);
   if (Adapter != 0 || !pPresentationParameters || !ppReturnedDeviceInterface)
     return D3DERR_INVALIDCALL;
 

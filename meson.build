@@ -158,8 +158,10 @@ if dxmt_crossbuild
       '-Wl,--kill-at',
     ]
     # Fix stack alignment issues with mingw on 32-bit
+    # Use msvcrt instead of ucrt — CrossOver's Wine is missing some ucrt api-ms-win-crt-* DLLs
     compiler_args += [
-      '-mpreferred-stack-boundary=2'
+      '-mpreferred-stack-boundary=2',
+      '-mcrtdll=msvcrt',
     ]
     if wine_builtin_dll
       windows_native_install_dir = 'i386-windows'
