@@ -2242,9 +2242,8 @@ bool D3D9Device::EnsureRenderEncoder() {
     InvalidateCurrentPass();
 
   if (encoder_state_ == EncoderState::Idle) {
-    // Pre-reserve space for the fixed VS/PS struct region at offset 0
-    constexpr uint64_t FIXED_REGION = 3 * 8 + 18 * 8; // VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE
-    auto argbuf_size_owner = std::make_unique<uint64_t>(FIXED_REGION);
+    // No fixed region — VS/PS structs are allocated per-draw at bumping offsets
+    auto argbuf_size_owner = std::make_unique<uint64_t>(0);
     argbuf_size_ptr_ = argbuf_size_owner.get();
 
     auto &queue = dxmt_device_->queue();
@@ -2593,31 +2592,15 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   // Resolve rasterizer state (always recompute — must re-emit after pass reopen)
   WMTCullMode cull_mode = ConvertCullMode(render_states_[D3DRS_CULLMODE]);
 
-  // VS/PS structs are always at fixed offsets 0 and VS_ARGBUF_STRUCT_SIZE.
-  // Only VB entries and constants get new offsets per draw.
-  // This avoids changing buffer[29]/[30] offsets between draws, which doesn't
-  // work correctly with Metal argument buffer indirection.
-  constexpr uint64_t FIXED_REGION = VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE;
-  uint64_t vs_struct_off = 0;
-  uint64_t ps_struct_off = VS_ARGBUF_STRUCT_SIZE;
-
-  // Allocate space for variable-size data (VB entries + constants) AFTER the fixed region
-  uint64_t var_alloc_size = vb_alloc_size + vs_alloc_size + ps_alloc_size;
-  uint64_t var_base;
-  if (var_alloc_size > 0) {
-    var_base = PreAllocateArgumentBuffer(var_alloc_size, 16);
-    // Ensure variable data starts after the fixed region
-    if (var_base < FIXED_REGION) {
-      // First draw: skip past fixed region
-      (void)PreAllocateArgumentBuffer(FIXED_REGION - var_base, 1);
-      var_base = PreAllocateArgumentBuffer(var_alloc_size, 16);
-    }
-  } else {
-    var_base = FIXED_REGION; // dummy
-  }
+  // Allocate ALL per-draw data (VS/PS structs + VB entries + constants) at a new
+  // position each draw. Metal caches ArgumentBindingIndirectBuffer contents, so
+  // we must write to a fresh offset and re-bind with setVertexBuffer/setFragmentBuffer.
+  uint64_t draw_alloc_size = VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE
+                            + vb_alloc_size + vs_alloc_size + ps_alloc_size;
+  uint64_t draw_base = PreAllocateArgumentBuffer(draw_alloc_size, 16);
 
   uint64_t vb_off;
-  uint64_t next_off = var_base;
+  uint64_t next_off = draw_base;
   if (vb_reuse) {
     vb_off = last_vb_argbuf_off_;
   } else {
@@ -2638,6 +2621,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     ps_const_off_local = next_off;
     next_off += ps_const_buf_size;
   }
+  // VS/PS structs at the end of this draw's allocation
+  uint64_t vs_struct_off = next_off;
+  uint64_t ps_struct_off = vs_struct_off + VS_ARGBUF_STRUCT_SIZE;
 
   // Copy constants to command heap — skip when version unchanged (reuse argbuf offset)
   void *vs_const_data = nullptr;
@@ -2753,11 +2739,10 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     if (ps_const_data)
       memcpy(ctx.getMappedArgumentBuffer<char>(ps_const_off_local), ps_const_data, ps_const_buf_size);
 
-    // VS argument struct at fixed offset 0 (never changes between draws)
+    // VS argument struct — written at a new offset each draw, re-bind buffer 29
     auto *vs_s = ctx.getMappedArgumentBuffer<uint64_t>(vs_struct_off);
     vs_s[0] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
     vs_s[1] = (uint64_t)vs_const_count;
-    // Pack half-pixel offset as two floats in a uint64: float2(1/w, 1/h)
     {
       float hpx = 1.0f / (float)vp.Width;
       float hpy = 1.0f / (float)vp.Height;
@@ -2766,7 +2751,12 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
       memcpy(&hpy_bits, &hpy, 4);
       vs_s[2] = (uint64_t)hpx_bits | ((uint64_t)hpy_bits << 32);
     }
-    // VB entries at index 16 (direct buffer, supports offset changes between draws)
+    // Re-bind buffer 29 to the new VS struct offset (can't use offset-only — Metal caches indirect buffers)
+    { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
+      c.type = WMTRenderCommandSetVertexBuffer;
+      c.buffer = ctx.getFinalArgumentBuffer().handle;
+      c.offset = ctx.getFinalArgumentBufferOffset(vs_struct_off); c.index = 29; }
+    // VB entries at index 16
     { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
       c.type = WMTRenderCommandSetVertexBufferOffset;
       c.offset = ctx.getFinalArgumentBufferOffset(vb_off); c.index = 16; }
@@ -2826,8 +2816,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
       ps_s[0] = ctx.getArgumentBufferGPUAddress(ps_const_off_local);
       ps_s[1] = (uint64_t)ps_const_count;
       memcpy(&ps_s[2], ctx.getMappedArgumentBuffer<uint64_t>(prev_ps_tex_off), 16 * sizeof(uint64_t));
-      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
-        c.type = WMTRenderCommandSetFragmentBufferOffset;
+      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
+        c.type = WMTRenderCommandSetFragmentBuffer;
+        c.buffer = ctx.getFinalArgumentBuffer().handle;
         c.offset = ctx.getFinalArgumentBufferOffset(ps_struct_off); c.index = 30; }
     });
   } else {
@@ -2857,8 +2848,9 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
         ps_s[3 + tb.stage * 2] = tb.sampler_gpu_id;
         ctx.makeResident<PipelineStage::Pixel, PipelineKind::Ordinary>(view);
       }
-      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
-        c.type = WMTRenderCommandSetFragmentBufferOffset;
+      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
+        c.type = WMTRenderCommandSetFragmentBuffer;
+        c.buffer = ctx.getFinalArgumentBuffer().handle;
         c.offset = ctx.getFinalArgumentBufferOffset(ps_struct_off); c.index = 30; }
     });
   }
