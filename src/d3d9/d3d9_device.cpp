@@ -2592,15 +2592,24 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   // Resolve rasterizer state (always recompute — must re-emit after pass reopen)
   WMTCullMode cull_mode = ConvertCullMode(render_states_[D3DRS_CULLMODE]);
 
-  // Allocate ALL per-draw data (VS/PS structs + VB entries + constants) at a new
-  // position each draw. Metal caches ArgumentBindingIndirectBuffer contents, so
-  // we must write to a fresh offset and re-bind with setVertexBuffer/setFragmentBuffer.
-  uint64_t draw_alloc_size = VS_ARGBUF_STRUCT_SIZE + PS_ARGBUF_STRUCT_SIZE
-                            + vb_alloc_size + vs_alloc_size + ps_alloc_size;
-  uint64_t draw_base = PreAllocateArgumentBuffer(draw_alloc_size, 16);
+  // Determine what actually needs re-emission this draw.
+  // Metal caches ArgumentBindingIndirectBuffer contents, so when the VS or PS
+  // struct changes we must write at a fresh offset and re-bind with setVertexBuffer/setFragmentBuffer.
+  // When state is unchanged, skip the allocation and re-bind entirely.
+  // VS needs re-bind when constants or VB changed. PS needs re-bind when PS constants changed
+  // or tex_dirty_ (texture bindings changed). We always re-bind on first draw (last offsets = 0).
+  bool vs_needs_rebind = !vs_const_reuse || !vb_reuse || !last_vb_argbuf_off_;
+  bool ps_needs_rebind = !ps_const_reuse || tex_dirty_ || !last_ps_tex_argbuf_off_;
+
+  uint64_t vs_struct_alloc = vs_needs_rebind ? VS_ARGBUF_STRUCT_SIZE : 0;
+  uint64_t ps_struct_alloc = ps_needs_rebind ? PS_ARGBUF_STRUCT_SIZE : 0;
+  uint64_t draw_alloc_size = vb_alloc_size + vs_alloc_size + ps_alloc_size
+                            + vs_struct_alloc + ps_struct_alloc;
+
+  uint64_t draw_base = draw_alloc_size > 0 ? PreAllocateArgumentBuffer(draw_alloc_size, 16) : 0;
+  uint64_t next_off = draw_base;
 
   uint64_t vb_off;
-  uint64_t next_off = draw_base;
   if (vb_reuse) {
     vb_off = last_vb_argbuf_off_;
   } else {
@@ -2621,9 +2630,10 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     ps_const_off_local = next_off;
     next_off += ps_const_buf_size;
   }
-  // VS/PS structs at the end of this draw's allocation
-  uint64_t vs_struct_off = next_off;
-  uint64_t ps_struct_off = vs_struct_off + VS_ARGBUF_STRUCT_SIZE;
+  uint64_t vs_struct_off = vs_needs_rebind ? next_off : 0;
+  if (vs_needs_rebind) next_off += VS_ARGBUF_STRUCT_SIZE;
+  uint64_t ps_struct_off = ps_needs_rebind ? next_off : 0;
+  if (ps_needs_rebind) next_off += PS_ARGBUF_STRUCT_SIZE;
 
   // Copy constants to command heap — skip when version unchanged (reuse argbuf offset)
   void *vs_const_data = nullptr;
@@ -2699,11 +2709,37 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
   vp_dirty_ = false;
   scissor_dirty_ = false;
 
-  // Emit render state + constants + VS struct
-  chunk->emitcc([=](ArgumentEncodingContext &ctx) {
+  // Capture VB entries on API thread (only when VB state changed)
+  struct VBCapture { WMT::Buffer raw_buffer; uint64_t gpu_address = 0; UINT offset = 0; UINT stride = 0; };
+  std::array<VBCapture, 16> vb_captures;
+  if (!vb_reuse && slot_mask) {
+    for (uint32_t mask = slot_mask, idx = 0; mask; mask &= mask - 1) {
+      uint32_t slot = __builtin_ctz(mask);
+      auto &vc = vb_captures[idx++];
+      if (slot == 0 && transient_vb_override_.active) {
+        vc.raw_buffer = transient_vb_override_.buffer;
+        vc.gpu_address = transient_vb_override_.gpu_address;
+        vc.offset = 0; vc.stride = transient_vb_override_.stride;
+      } else {
+        vc.stride = stream_strides_[slot]; vc.offset = stream_offsets_[slot];
+        if (stream_sources_[slot]) {
+          vc.raw_buffer = stream_sources_[slot]->rawBuffer();
+          vc.gpu_address = stream_sources_[slot]->gpuAddress();
+        }
+      }
+    }
+  }
+
+  // Texture capture — only done when PS needs full re-bind with new textures
+  bool tex_full_rebind = ps_needs_rebind && !tex_reuse;
+  uint64_t prev_ps_tex_off = (ps_needs_rebind && tex_reuse) ? last_ps_tex_argbuf_off_ : 0;
+
+  // === SINGLE emitcc per draw: render state + constants + VS/PS structs + VB entries ===
+  chunk->emitcc([=, vb_captures = std::move(vb_captures)](ArgumentEncodingContext &ctx) mutable {
+    // Render state (only when changed)
     if (emit_pso) {
       auto pso_handle = pso->GetPipeline();
-      if (!pso_handle) return; // PSO compilation failed — skip this draw
+      if (!pso_handle) return;
       auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_setpso>();
       cmd.type = WMTRenderCommandSetPSO; cmd.pso = pso_handle;
     }
@@ -2734,62 +2770,32 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
                            (uint64_t)(scissor.bottom > top ? scissor.bottom - top : 0)};
     }
 
+    // Copy constants to argument buffer (only changed ones)
     if (vs_const_data)
       memcpy(ctx.getMappedArgumentBuffer<char>(vs_const_off_local), vs_const_data, vs_const_buf_size);
     if (ps_const_data)
       memcpy(ctx.getMappedArgumentBuffer<char>(ps_const_off_local), ps_const_data, ps_const_buf_size);
 
-    // VS argument struct — written at a new offset each draw, re-bind buffer 29
-    auto *vs_s = ctx.getMappedArgumentBuffer<uint64_t>(vs_struct_off);
-    vs_s[0] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
-    vs_s[1] = (uint64_t)vs_const_count;
-    {
-      float hpx = 1.0f / (float)vp.Width;
-      float hpy = 1.0f / (float)vp.Height;
-      uint32_t hpx_bits, hpy_bits;
-      memcpy(&hpx_bits, &hpx, 4);
-      memcpy(&hpy_bits, &hpy, 4);
-      vs_s[2] = (uint64_t)hpx_bits | ((uint64_t)hpy_bits << 32);
+    // VS struct + buffer 29 re-bind (only when VS state changed)
+    if (vs_needs_rebind) {
+      auto *vs_s = ctx.getMappedArgumentBuffer<uint64_t>(vs_struct_off);
+      vs_s[0] = ctx.getArgumentBufferGPUAddress(vs_const_off_local);
+      vs_s[1] = (uint64_t)vs_const_count;
+      { float hpx = 1.0f / (float)vp.Width, hpy = 1.0f / (float)vp.Height;
+        uint32_t hpx_bits, hpy_bits;
+        memcpy(&hpx_bits, &hpx, 4); memcpy(&hpy_bits, &hpy, 4);
+        vs_s[2] = (uint64_t)hpx_bits | ((uint64_t)hpy_bits << 32); }
+      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
+        c.type = WMTRenderCommandSetVertexBuffer;
+        c.buffer = ctx.getFinalArgumentBuffer().handle;
+        c.offset = ctx.getFinalArgumentBufferOffset(vs_struct_off); c.index = 29; }
+      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
+        c.type = WMTRenderCommandSetVertexBufferOffset;
+        c.offset = ctx.getFinalArgumentBufferOffset(vb_off); c.index = 16; }
     }
-    // Re-bind buffer 29 to the new VS struct offset (can't use offset-only — Metal caches indirect buffers)
-    { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
-      c.type = WMTRenderCommandSetVertexBuffer;
-      c.buffer = ctx.getFinalArgumentBuffer().handle;
-      c.offset = ctx.getFinalArgumentBufferOffset(vs_struct_off); c.index = 29; }
-    // VB entries at index 16
-    { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbufferoffset>();
-      c.type = WMTRenderCommandSetVertexBufferOffset;
-      c.offset = ctx.getFinalArgumentBufferOffset(vb_off); c.index = 16; }
-  });
 
-  // Emit VB entries — skip entirely when fingerprint unchanged (same argbuf offset reused)
-  if (!vb_reuse && slot_mask) {
-    // Full path: capture and write VB entries
-    struct VBCapture {
-      WMT::Buffer raw_buffer;
-      uint64_t gpu_address = 0;
-      UINT offset = 0;
-      UINT stride = 0;
-    };
-    std::array<VBCapture, 16> vb_captures;
-    for (uint32_t mask = slot_mask, idx = 0; mask; mask &= mask - 1) {
-      uint32_t slot = __builtin_ctz(mask);
-      auto &vc = vb_captures[idx++];
-      if (slot == 0 && transient_vb_override_.active) {
-        vc.raw_buffer = transient_vb_override_.buffer;
-        vc.gpu_address = transient_vb_override_.gpu_address;
-        vc.offset = 0;
-        vc.stride = transient_vb_override_.stride;
-      } else {
-        vc.stride = stream_strides_[slot];
-        vc.offset = stream_offsets_[slot];
-        if (stream_sources_[slot]) {
-          vc.raw_buffer = stream_sources_[slot]->rawBuffer();
-          vc.gpu_address = stream_sources_[slot]->gpuAddress();
-        }
-      }
-    }
-    chunk->emitcc([=, vb_captures = std::move(vb_captures)](ArgumentEncodingContext &ctx) mutable {
+    // VB entries (only when VB state changed)
+    if (!vb_reuse && slot_mask) {
       struct VERTEX_BUFFER_ENTRY { uint64_t buffer_handle; uint32_t stride; uint32_t length; };
       auto *entries = ctx.getMappedArgumentBuffer<VERTEX_BUFFER_ENTRY>(vb_off);
       for (uint32_t mask = slot_mask, idx = 0; mask; mask &= mask - 1, idx++) {
@@ -2800,35 +2806,31 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
           entries[idx].length = vc.stride ? 0xFFFFFFFF : 0;
           ctx.makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(
               vc.raw_buffer, DXMT_RESOURCE_RESIDENCY_VERTEX_READ);
-        } else {
-          entries[idx] = {0, 0, 0};
-        }
+        } else { entries[idx] = {0, 0, 0}; }
       }
-    });
-  }
+    }
 
-  // Emit PS argument buffer: constants + texture bindings
-  if (tex_reuse) {
-    // Fast path: reuse previous texture bindings from argbuf
-    uint64_t prev_ps_tex_off = last_ps_tex_argbuf_off_;
-    chunk->emitcc([=](ArgumentEncodingContext &ctx) {
+    // PS struct + buffer 30 re-bind (only when PS state changed)
+    if (ps_needs_rebind) {
       auto *ps_s = ctx.getMappedArgumentBuffer<uint64_t>(ps_struct_off);
       ps_s[0] = ctx.getArgumentBufferGPUAddress(ps_const_off_local);
       ps_s[1] = (uint64_t)ps_const_count;
-      memcpy(&ps_s[2], ctx.getMappedArgumentBuffer<uint64_t>(prev_ps_tex_off), 16 * sizeof(uint64_t));
+      if (!tex_full_rebind) {
+        memcpy(&ps_s[2], ctx.getMappedArgumentBuffer<uint64_t>(prev_ps_tex_off), 16 * sizeof(uint64_t));
+      } else {
+        for (uint32_t i = 0; i < 16; i++) ps_s[2 + i] = 0;
+        // tex_captures_ is still valid here (set during tex_dirty_ rebuild above)
+      }
       { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
         c.type = WMTRenderCommandSetFragmentBuffer;
         c.buffer = ctx.getFinalArgumentBuffer().handle;
         c.offset = ctx.getFinalArgumentBufferOffset(ps_struct_off); c.index = 30; }
-    });
-  } else {
-    struct TexBindCapture {
-      Rc<Texture> texture;
-      Rc<TextureAllocation> alloc;
-      TextureViewKey viewKey;
-      uint32_t stage;
-      uint64_t sampler_gpu_id;
-    };
+    }
+  });
+
+  // Separate emitcc for full texture re-bind (rare path — avoids Rc<> capture cost on hot path)
+  if (tex_full_rebind) {
+    struct TexBindCapture { Rc<Texture> texture; Rc<TextureAllocation> alloc; TextureViewKey viewKey; uint32_t stage; uint64_t sampler_gpu_id; };
     uint8_t tex_count = tex_capture_count_;
     std::array<TexBindCapture, 16> tex_binds;
     for (uint8_t i = 0; i < tex_count; i++) {
@@ -2838,9 +2840,6 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
     }
     chunk->emitcc([=, tex_binds = std::move(tex_binds)](ArgumentEncodingContext &ctx) mutable {
       auto *ps_s = ctx.getMappedArgumentBuffer<uint64_t>(ps_struct_off);
-      ps_s[0] = ctx.getArgumentBufferGPUAddress(ps_const_off_local);
-      ps_s[1] = (uint64_t)ps_const_count;
-      for (uint32_t i = 0; i < 16; i++) ps_s[2 + i] = 0;
       for (uint8_t i = 0; i < tex_count; i++) {
         auto &tb = tex_binds[i];
         auto &view = ctx.access(tb.texture, tb.alloc.ptr(), tb.viewKey, DXMT_ENCODER_RESOURCE_ACESS_READ);
@@ -2848,16 +2847,12 @@ bool D3D9Device::PreDraw(WMTPrimitiveType mtlPrimType) {
         ps_s[3 + tb.stage * 2] = tb.sampler_gpu_id;
         ctx.makeResident<PipelineStage::Pixel, PipelineKind::Ordinary>(view);
       }
-      { auto &c = ctx.encodeRenderCommand<wmtcmd_render_setbuffer>();
-        c.type = WMTRenderCommandSetFragmentBuffer;
-        c.buffer = ctx.getFinalArgumentBuffer().handle;
-        c.offset = ctx.getFinalArgumentBufferOffset(ps_struct_off); c.index = 30; }
     });
   }
 
   // Track argbuf offsets for reuse
   last_tex_fingerprint_ = tex_sampler_fingerprint_;
-  last_ps_tex_argbuf_off_ = ps_struct_off + 2 * sizeof(uint64_t);
+  if (ps_needs_rebind) last_ps_tex_argbuf_off_ = ps_struct_off + 2 * sizeof(uint64_t);
   last_vb_fingerprint_ = vb_fingerprint;
   last_vb_argbuf_off_ = vb_off;
   last_vb_num_slots_ = num_vb_slots;
